@@ -1,0 +1,2 @@
+Nested document inside a subdirectory. This verifies recursive scanning
+discovers documents beyond the top level of the selected source folder.

@@ -1,0 +1,12 @@
+DocVecWizard Fixture Document
+
+This is a plain text sample used for automated testing of the offline
+document processing pipeline. It contains multiple sentences that are
+long enough to exercise the chunker. The chunker splits text into
+overlapping segments so that no meaning is lost at the boundary between
+two adjacent chunks. Umlauts and special characters are included: ä ö ü
+ß Ä Ö Ü. Unicode symbols such as €, ©, and emoji 🚀 are also supported.
+
+The pipeline ingests a document, converts it to normalized text, splits
+it into chunks, embeds each chunk with a Qwen3 model, and stores the
+resulting vectors in Milvus for later semantic search.

@@ -1,0 +1,29 @@
+[
+  {
+    "name": "Qwen3-Embedding-0.6B",
+    "repo": "Qwen/Qwen3-Embedding-0.6B",
+    "parameters": "0.6B",
+    "dimension": 1024,
+    "max_input_tokens": 32768,
+    "normalization": "l2",
+    "distance_metric": "cosine"
+  },
+  {
+    "name": "Qwen3-Embedding-4B",
+    "repo": "Qwen/Qwen3-Embedding-4B",
+    "parameters": "4B",
+    "dimension": 2560,
+    "max_input_tokens": 32768,
+    "normalization": "l2",
+    "distance_metric": "cosine"
+  },
+  {
+    "name": "Qwen3-Embedding-8B",
+    "repo": "Qwen/Qwen3-Embedding-8B",
+    "parameters": "8B",
+    "dimension": 4096,
+    "max_input_tokens": 32768,
+    "normalization": "l2",
+    "distance_metric": "cosine"
+  }
+]
