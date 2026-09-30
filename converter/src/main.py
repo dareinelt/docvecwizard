@@ -29,7 +29,6 @@ TIMEOUT = int(os.environ.get("CONVERT_TIMEOUT", "300"))
 # Pandoc input formats we use directly.
 PANDOC_FORMATS = {
     ".docx": "docx",
-    ".pptx": "pptx",
     ".rtf": "rtf",
     ".odt": "odt",
     ".html": "html",
@@ -39,8 +38,11 @@ PANDOC_FORMATS = {
     ".markdown": "markdown",
 }
 
-# Formats converted via LibreOffice headless.
-LIBREOFFICE_FORMATS = {".xlsx", ".ods", ".odp", ".ppt"}
+# Spreadsheets: LibreOffice headless -> CSV.
+SPREADSHEET_FORMATS = {".xlsx", ".ods", ".xls"}
+
+# Presentations and legacy binary Word: LibreOffice headless -> PDF -> pdftotext.
+PDF_VIA_LIBREOFFICE_FORMATS = {".pptx", ".odp", ".ppt", ".doc"}
 
 # Formats read as plain text.
 PLAIN_FORMATS = {".txt", ".md", ".markdown", ".csv"}
@@ -114,6 +116,25 @@ def _libreoffice(path: Path, out_fmt: str) -> str:
         return produced[0].read_text(encoding="utf-8", errors="replace")
 
 
+def _libreoffice_pdf(path: Path) -> tuple[str, int]:
+    """Convert via LibreOffice to PDF, then extract text with pdftotext."""
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = _run(
+            [
+                "libreoffice", "--headless", "--norestore",
+                "--convert-to", "pdf",
+                "--outdir", tmp, str(path),
+            ],
+            timeout=TIMEOUT,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(status_code=422, detail=f"libreoffice failed: {proc.stderr[:300]}")
+        produced = list(Path(tmp).glob("*.pdf"))
+        if not produced:
+            raise HTTPException(status_code=422, detail="libreoffice produced no output")
+        return _pdftotext(produced[0])
+
+
 def _pdftotext(path: Path) -> tuple[str, int]:
     proc = _run(["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"])
     if proc.returncode != 0:
@@ -150,19 +171,20 @@ def convert(req: ConvertRequest) -> dict[str, Any]:
     elif ext in PANDOC_FORMATS:
         text = _pandoc(path, PANDOC_FORMATS[ext])
         pages = 0
-    elif ext in LIBREOFFICE_FORMATS:
-        text = _libreoffice(path, "csv" if ext in {".xlsx", ".ods"} else "txt")
+    elif ext in SPREADSHEET_FORMATS:
+        text = _libreoffice(path, "csv")
         pages = 0
+    elif ext in PDF_VIA_LIBREOFFICE_FORMATS:
+        text, pages = _libreoffice_pdf(path)
     elif ext in PLAIN_FORMATS:
         text = path.read_text(encoding="utf-8", errors="replace")
         pages = 0
     else:
-        # Fallback: try LibreOffice to txt.
+        # Fallback: try LibreOffice to PDF, then pdftotext.
         try:
-            text = _libreoffice(path, "txt")
+            text, pages = _libreoffice_pdf(path)
         except HTTPException:
             raise HTTPException(status_code=415, detail=f"unsupported file type: {ext}")
-        pages = 0
 
     text = text.strip()
     if not text:
@@ -183,14 +205,19 @@ def _guess_mime(ext: str) -> str:
     return {
         ".pdf": "application/pdf",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".doc": "application/msword",
         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".ppt": "application/vnd.ms-powerpoint",
         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls": "application/vnd.ms-excel",
         ".odt": "application/vnd.oasis.opendocument.text",
         ".ods": "application/vnd.oasis.opendocument.spreadsheet",
         ".odp": "application/vnd.oasis.opendocument.presentation",
         ".rtf": "application/rtf",
         ".txt": "text/plain",
         ".md": "text/markdown",
+        ".markdown": "text/markdown",
         ".csv": "text/csv",
         ".html": "text/html",
+        ".htm": "text/html",
     }.get(ext, "application/octet-stream")

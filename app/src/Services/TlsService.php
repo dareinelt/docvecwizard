@@ -166,7 +166,7 @@ final class TlsService
         $csrs = Db::fetchAll('SELECT * FROM tls_certificates WHERE kind = "csr" AND cert_pem IS NULL ORDER BY id DESC');
         $matched = null;
         foreach ($csrs as $row) {
-            $csrKey = openssl_pkey_get_public((string) $row['csr_pem']);
+            $csrKey = openssl_csr_get_public_key((string) $row['csr_pem']);
             if ($csrKey === false || $certKey === false) {
                 continue;
             }

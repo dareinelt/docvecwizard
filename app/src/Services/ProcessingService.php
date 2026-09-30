@@ -210,11 +210,9 @@ final class ProcessingService
                 }
             }
 
-            if ($storedChunks > 0) {
-                // Move inserted vectors into sealed segments so rowCount/stats
-                // reflect the document immediately.
-                $this->milvus->flush($collection);
-            }
+            // Note: the collection is flushed once per job (see worker finalizeJob),
+            // not per document. Milvus rate-limits collection flushes (0.1 qps by
+            // default), so flushing here would fail on the second document.
 
             $characterCount = mb_strlen($text);
             $wordCount = $this->wordCount($text);

@@ -17,6 +17,7 @@ use App\Core\Db;
 use App\Core\Logger;
 use App\Services\EmbeddingClient;
 use App\Services\JobService;
+use App\Services\MilvusClient;
 use App\Services\ModelService;
 use App\Services\ProcessingService;
 
@@ -37,15 +38,33 @@ if (function_exists('pcntl_async_signals')) {
 
 function finalizeJob(int $id): void
 {
-    (new JobService())->refreshCounters($id);
-    $job = (new JobService())->getById($id);
+    $jobService = new JobService();
+    $jobService->refreshCounters($id);
+    $job = $jobService->getById($id);
     if ($job === null) {
         return;
     }
+
+    // Flush the collection once per job so inserted vectors move into sealed
+    // segments and become visible to stats/search. Milvus rate-limits collection
+    // flushes (0.1 qps by default), so this is a single, deliberate flush rather
+    // than one per document.
+    if ((int) $job['vectors_total'] > 0) {
+        try {
+            $milvus = new MilvusClient();
+            $milvus->flush(MilvusClient::collectionFor((string) $job['embedding_model']));
+        } catch (\Throwable $e) {
+            Logger::channel('worker')->warning('collection flush failed', [
+                'job_id' => $job['job_id'],
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     if ((int) $job['documents_failed'] > 0 && (int) $job['documents_processed'] === 0) {
-        (new JobService())->setStatus($id, JobService::STATUS_FAILED);
+        $jobService->setStatus($id, JobService::STATUS_FAILED);
     } else {
-        (new JobService())->setStatus($id, JobService::STATUS_COMPLETED);
+        $jobService->setStatus($id, JobService::STATUS_COMPLETED);
     }
     Logger::channel('worker')->info('job finalized', [
         'job_id' => $job['job_id'],

@@ -123,10 +123,10 @@ final class MilvusClient
      */
     public function insert(string $collection, array $rows): void
     {
-        $this->assertOk($this->client->post('/v2/vectordb/entities/insert', [
+        $this->retriablePost('/v2/vectordb/entities/insert', [
             'collectionName' => $collection,
             'data' => $rows,
-        ]));
+        ]);
     }
 
     /**
@@ -135,9 +135,9 @@ final class MilvusClient
      */
     public function flush(string $collection): void
     {
-        $this->assertOk($this->client->post('/v2/vectordb/collections/flush', [
+        $this->retriablePost('/v2/vectordb/collections/flush', [
             'collectionName' => $collection,
-        ]));
+        ]);
     }
 
     /** @param list<list<float>> $vectors @param array<string,mixed> $searchParams @return array<string,mixed> */
@@ -186,5 +186,42 @@ final class MilvusClient
         }
 
         return $response;
+    }
+
+    /**
+     * POST to Milvus with bounded retries for transient, retriable errors
+     * (rate limiting is the common one: code 1807). Uses exponential backoff so
+     * a burst of inserts does not permanently fail under the gRPC rate limiter.
+     *
+     * @param array<string,mixed> $payload
+     * @return array<string,mixed>
+     */
+    private function retriablePost(string $path, array $payload, int $maxAttempts = 6): array
+    {
+        $attempt = 0;
+        while (true) {
+            try {
+                return $this->assertOk($this->client->post($path, $payload));
+            } catch (\RuntimeException $e) {
+                $attempt++;
+                if ($attempt >= $maxAttempts || !$this->isRetriable($e)) {
+                    throw $e;
+                }
+                // 0.5s, 1s, 2s, 4s, 8s (capped).
+                $micros = min(500_000 * (2 ** ($attempt - 1)), 8_000_000);
+                usleep($micros);
+            }
+        }
+    }
+
+    private function isRetriable(\RuntimeException $e): bool
+    {
+        if (preg_match('/^Milvus error (\d+):/', $e->getMessage(), $m) === 1) {
+            $code = (int) $m[1];
+
+            return in_array($code, [1807], true);
+        }
+
+        return false;
     }
 }
