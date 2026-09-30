@@ -71,7 +71,7 @@ final class Chunker
                     $current = '';
                     $currentTokens = 0;
                 }
-                foreach ($this->hardSplit($segment) as $piece) {
+                foreach ($this->hardSplit($segment, $this->hardMaxTokens) as $piece) {
                     $chunks[] = $this->makeChunk($piece);
                 }
                 continue;
@@ -123,8 +123,10 @@ final class Chunker
             if ($sentence === '') {
                 continue;
             }
-            if (self::estimateTokens($sentence) > $this->hardMaxTokens) {
-                $result = array_merge($result, $this->hardSplit($sentence));
+            // Cap every segment at maxTokens so the packer in chunk() can
+            // accumulate them (with overlap) without exceeding hardMaxTokens.
+            if (self::estimateTokens($sentence) > $this->maxTokens) {
+                $result = array_merge($result, $this->hardSplit($sentence, $this->maxTokens));
             } else {
                 $result[] = $sentence;
             }
@@ -134,16 +136,53 @@ final class Chunker
     }
 
     /** @return list<string> */
-    private function hardSplit(string $segment): array
+    private function hardSplit(string $segment, int $limitTokens): array
     {
         $words = preg_split('/\s+/u', trim($segment)) ?: [];
         $pieces = [];
         $current = '';
         foreach ($words as $word) {
+            // A single "word" with no whitespace can still exceed the limit
+            // (e.g. a huge base64 blob or URL). Character-split it directly.
+            if (self::estimateTokens($word) > $limitTokens) {
+                if ($current !== '') {
+                    $pieces[] = $current;
+                    $current = '';
+                }
+                $pieces = array_merge($pieces, $this->hardSplitWord($word, $limitTokens));
+                continue;
+            }
             $candidate = $current === '' ? $word : $current . ' ' . $word;
-            if (self::estimateTokens($candidate) > $this->hardMaxTokens && $current !== '') {
+            if (self::estimateTokens($candidate) > $limitTokens && $current !== '') {
                 $pieces[] = $current;
                 $current = $word;
+            } else {
+                $current = $candidate;
+            }
+        }
+        if ($current !== '') {
+            $pieces[] = $current;
+        }
+
+        return $pieces;
+    }
+
+    /**
+     * Split an over-long, whitespace-free token into character-level pieces that
+     * each respect the given token limit.
+     *
+     * @return list<string>
+     */
+    private function hardSplitWord(string $word, int $limitTokens): array
+    {
+        $chars = preg_split('//u', $word, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $pieces = [];
+        $current = '';
+        foreach ($chars as $char) {
+            $candidate = $current . $char;
+            if (self::estimateTokens($candidate) > $limitTokens && $current !== '') {
+                $pieces[] = $current;
+                $current = $char;
             } else {
                 $current = $candidate;
             }
@@ -174,16 +213,42 @@ final class Chunker
         $tokens = 0;
         for ($i = count($words) - 1; $i >= 0; $i--) {
             $w = $words[$i];
-            $tokens += self::estimateTokens($w);
-            if ($tokens > $tokenBudget && $kept !== []) {
+            $wTokens = self::estimateTokens($w);
+            // A single whitespace-free word can exceed the whole budget; take
+            // only its trailing characters so the overlap never overruns.
+            if ($wTokens >= $tokenBudget) {
+                array_unshift($kept, $this->tailChars($w, $tokenBudget));
+                break;
+            }
+            if ($tokens + $wTokens > $tokenBudget && $kept !== []) {
                 break;
             }
             array_unshift($kept, $w);
-            if ($tokens > $tokenBudget) {
+            $tokens += $wTokens;
+            if ($tokens >= $tokenBudget) {
                 break;
             }
         }
 
         return implode(' ', $kept);
+    }
+
+    /** Return the trailing characters of a word up to $tokenBudget tokens. */
+    private function tailChars(string $word, int $tokenBudget): string
+    {
+        $chars = preg_split('//u', $word, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        $kept = [];
+        for ($i = count($chars) - 1; $i >= 0; $i--) {
+            $candidate = $chars[$i] . implode('', $kept);
+            if (self::estimateTokens($candidate) > $tokenBudget) {
+                break;
+            }
+            array_unshift($kept, $chars[$i]);
+            if (self::estimateTokens($candidate) >= $tokenBudget) {
+                break;
+            }
+        }
+
+        return implode('', $kept);
     }
 }
