@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\Config;
+use App\Core\Db;
 use App\Http\Request;
 use App\Http\Response;
 use App\Http\Router;
@@ -15,6 +16,7 @@ use App\Services\DirectoryBrowser;
 use App\Services\DocumentService;
 use App\Services\EmbeddingClient;
 use App\Services\ExportService;
+use App\Services\IntegrityService;
 use App\Services\JobService;
 use App\Services\MilvusClient;
 use App\Services\ModelService;
@@ -47,6 +49,21 @@ final class ApiController
         $router->get('/api/documents', [$this, 'documents']);
         $router->get('/api/documents/{id}', [$this, 'document']);
         $router->delete('/api/documents/{id}', [$this, 'deleteDocument']);
+        $router->get('/api/documents/{id}/source', [$this, 'documentSource']);
+        $router->get('/api/documents/{id}/versions', [$this, 'documentVersions']);
+        $router->get('/api/documents/{id}/chunks', [$this, 'documentChunks']);
+        $router->get('/api/documents/{id}/vectors', [$this, 'documentVectors']);
+        $router->get('/api/documents/{id}/download', [$this, 'documentDownload']);
+        $router->get('/api/documents/{id}/metadata', [$this, 'documentMetadata']);
+
+        $router->get('/api/vectors/{id}', [$this, 'vector']);
+        $router->get('/api/vectors/{id}/document', [$this, 'vectorDocument']);
+        $router->get('/api/chunks/{id}', [$this, 'chunk']);
+        $router->get('/api/chunks/{id}/source', [$this, 'chunkSource']);
+        $router->get('/api/source/{id}', [$this, 'sourceByVersion']);
+
+        $router->get('/api/integrity', [$this, 'integrity']);
+        $router->get('/api/storage', [$this, 'storage']);
 
         $router->get('/api/browse', [$this, 'browse']);
         $router->post('/api/upload', [$this, 'upload']);
@@ -202,8 +219,164 @@ final class ApiController
             return Response::error('Document not found', 404);
         }
         $doc['chunks'] = $service->chunks($params['id']);
+        $doc['versions'] = $service->versions($params['id']);
+        $source = $service->source((string) $doc['document_version_id']);
+        unset($source['base64']);
+        $doc['source'] = $source;
 
         return Response::json(['document' => $doc]);
+    }
+
+    public function documentSource(Request $request, array $params): Response
+    {
+        $doc = (new DocumentService())->getByUuid($params['id']);
+        if ($doc === null) {
+            return Response::error('Document not found', 404);
+        }
+        $source = (new DocumentService())->source((string) $doc['document_version_id']);
+        unset($source['base64']);
+
+        return Response::json(['source' => $source]);
+    }
+
+    public function documentVersions(Request $request, array $params): Response
+    {
+        $versions = (new DocumentService())->versions($params['id']);
+        if ($versions === []) {
+            return Response::error('Document not found', 404);
+        }
+
+        return Response::json(['document_id' => $params['id'], 'versions' => $versions]);
+    }
+
+    public function documentChunks(Request $request, array $params): Response
+    {
+        $service = new DocumentService();
+        $doc = $service->getByUuid($params['id']);
+        if ($doc === null) {
+            return Response::error('Document not found', 404);
+        }
+
+        return Response::json(['chunks' => $service->chunksByVersion((string) $doc['document_version_id'])]);
+    }
+
+    public function documentVectors(Request $request, array $params): Response
+    {
+        $service = new DocumentService();
+        $doc = $service->getByUuid($params['id']);
+        if ($doc === null) {
+            return Response::error('Document not found', 404);
+        }
+
+        return Response::json(['vectors' => $service->vectorsByVersion((string) $doc['document_version_id'])]);
+    }
+
+    public function documentDownload(Request $request, array $params): Response
+    {
+        $service = new DocumentService();
+        $doc = $service->getByUuid($params['id']);
+        if ($doc === null) {
+            return Response::error('Document not found', 404);
+        }
+        $download = $service->download((string) $doc['document_version_id']);
+        if ($download === null) {
+            return Response::error('Original not available', 404);
+        }
+
+        return new Response(200, $download['bytes'], [
+            'Content-Type' => $download['mime_type'] !== '' ? $download['mime_type'] : 'application/octet-stream',
+            'Content-Disposition' => 'attachment; filename="' . addslashes($download['filename']) . '"',
+            'Content-Length' => (string) strlen($download['bytes']),
+        ]);
+    }
+
+    public function documentMetadata(Request $request, array $params): Response
+    {
+        $service = new DocumentService();
+        $doc = $service->getByUuid($params['id']);
+        if ($doc === null) {
+            return Response::error('Document not found', 404);
+        }
+
+        return Response::json(['metadata' => $service->metadata((string) $doc['document_version_id'])]);
+    }
+
+    public function vector(Request $request, array $params): Response
+    {
+        $vector = Db::fetchOne(
+            'SELECT c.vector_id, c.chunk_id, c.chunk_index, c.page_start, c.page_end, c.text_length, c.token_count, d.document_id, d.document_version_id
+             FROM document_chunks c JOIN documents d ON d.id = c.document_id
+             WHERE c.vector_id = ? LIMIT 1',
+            [$params['id']]
+        );
+        if ($vector === null) {
+            return Response::error('Vector not found', 404);
+        }
+
+        return Response::json(['vector' => $vector]);
+    }
+
+    public function vectorDocument(Request $request, array $params): Response
+    {
+        $row = Db::fetchOne(
+            'SELECT d.document_version_id FROM document_chunks c JOIN documents d ON d.id = c.document_id WHERE c.vector_id = ? LIMIT 1',
+            [$params['id']]
+        );
+        if ($row === null) {
+            return Response::error('Vector not found', 404);
+        }
+        $doc = (new DocumentService())->getVersion((string) $row['document_version_id']);
+
+        return $doc === null ? Response::error('Document not found', 404) : Response::json(['document' => $doc]);
+    }
+
+    public function chunk(Request $request, array $params): Response
+    {
+        $chunk = Db::fetchOne('SELECT * FROM document_chunks WHERE chunk_id = ? LIMIT 1', [$params['id']]);
+        if ($chunk === null) {
+            return Response::error('Chunk not found', 404);
+        }
+
+        return Response::json(['chunk' => $chunk]);
+    }
+
+    public function chunkSource(Request $request, array $params): Response
+    {
+        $chunk = Db::fetchOne('SELECT c.*, d.document_version_id FROM document_chunks c JOIN documents d ON d.id = c.document_id WHERE c.chunk_id = ? LIMIT 1', [$params['id']]);
+        if ($chunk === null) {
+            return Response::error('Chunk not found', 404);
+        }
+        $source = (new DocumentService())->source((string) $chunk['document_version_id']);
+        unset($source['base64']);
+
+        return Response::json(['source' => $source]);
+    }
+
+    public function sourceByVersion(Request $request, array $params): Response
+    {
+        $source = (new DocumentService())->source($params['id']);
+        if ($source === null) {
+            return Response::error('Document version not found', 404);
+        }
+        unset($source['base64']);
+        $chunks = (new DocumentService())->chunksByVersion($params['id']);
+        $source['chunks'] = array_map(
+            static fn (array $c): array => ['chunk_id' => $c['chunk_id'], 'page_start' => (int) $c['page_start'], 'page_end' => (int) $c['page_end']],
+            $chunks
+        );
+        $source['download_endpoint'] = '/api/documents/' . $source['document_id'] . '/download';
+
+        return Response::json($source);
+    }
+
+    public function integrity(Request $request): Response
+    {
+        return Response::json((new IntegrityService())->check());
+    }
+
+    public function storage(Request $request): Response
+    {
+        return Response::json((new StatisticsService())->storage());
     }
 
     public function deleteDocument(Request $request, array $params): Response
@@ -333,17 +506,24 @@ final class ApiController
     public function import(Request $request): Response
     {
         $this->guard($request);
-        $manifest = $request->body['manifest'] ?? null;
-        if (!is_array($manifest) && !empty($request->files)) {
+        $strategy = (string) $request->bodyField('strategy', 'skip');
+
+        // Archive upload (exported .tar.gz) -> full, verified, ID-preserving import.
+        if (!empty($request->files)) {
             $file = reset($request->files);
             if (is_array($file) && !empty($file['tmp_name'])) {
-                $raw = (string) file_get_contents((string) $file['tmp_name']);
-                $decoded = json_decode($raw, true);
-                $manifest = is_array($decoded) ? $decoded : null;
+                try {
+                    return Response::json((new ExportService())->importArchive((string) $file['tmp_name'], ['strategy' => $strategy]));
+                } catch (\Throwable $e) {
+                    return Response::error($e->getMessage(), 400);
+                }
             }
         }
+
+        // Legacy JSON manifest path (backwards compatible).
+        $manifest = $request->body['manifest'] ?? null;
         if (!is_array($manifest)) {
-            return Response::error('Expected "manifest" object or manifest.json upload', 400);
+            return Response::error('Expected an export archive upload or "manifest" object', 400);
         }
         try {
             return Response::json((new ExportService())->import($manifest));
@@ -463,11 +643,35 @@ final class ApiController
     {
         $hits = [];
         foreach ($result['data'] ?? [] as $row) {
+            $chunkId = (string) ($row['chunk_id'] ?? '');
+            $documentId = (string) ($row['document_id'] ?? '');
+            $versionId = (string) ($row['document_version_id'] ?? '');
+            $chunk = $chunkId !== '' ? Db::fetchOne('SELECT * FROM document_chunks WHERE chunk_id = ? LIMIT 1', [$chunkId]) : null;
+            $blob = null;
+            if ($documentId !== '' && $versionId !== '') {
+                $blob = Db::fetchOne(
+                    'SELECT sha256, file_size, mime_type FROM document_blobs WHERE document_version_id = ? LIMIT 1',
+                    [$versionId]
+                );
+            }
             $hits[] = [
+                'vector_id' => $row['id'] ?? null,
                 'distance' => $row['distance'] ?? null,
-                'id' => $row['id'] ?? null,
-                'document_id' => $row['document_id'] ?? null,
+                'chunk_id' => $chunkId !== '' ? $chunkId : null,
                 'chunk_index' => $row['chunk_index'] ?? null,
+                'page_start' => $row['page_start'] ?? null,
+                'page_end' => $row['page_end'] ?? null,
+                'text' => $chunk['text'] ?? null,
+                'document_id' => $documentId !== '' ? $documentId : null,
+                'document_version_id' => $versionId !== '' ? $versionId : null,
+                'filename' => $row['filename'] ?? null,
+                'source_path' => $row['source_path'] ?? null,
+                'document_hash' => $row['document_hash'] ?? ($blob['sha256'] ?? null),
+                'file_size' => $blob['file_size'] ?? null,
+                'mime_type' => $blob['mime_type'] ?? null,
+                'embedding_model' => $row['embedding_model'] ?? null,
+                'embedding_dimension' => $row['embedding_dimension'] ?? null,
+                'download_endpoint' => $documentId !== '' ? '/api/documents/' . $documentId . '/download' : null,
             ];
         }
 

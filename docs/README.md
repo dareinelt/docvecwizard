@@ -18,6 +18,7 @@ Dieses Verzeichnis enthält die vollständige technische und operative Dokumenta
 | [MILVUS.md](MILVUS.md) | Entwickler | Vektordatenbank-Integration |
 | [EMBEDDING.md](EMBEDDING.md) | Entwickler | Embedding-Service |
 | [DOCUMENT_PROCESSING.md](DOCUMENT_PROCESSING.md) | Entwickler | Dokumentenverarbeitung |
+| [SOURCE_REFERENCE.md](SOURCE_REFERENCE.md) | Entwickler, Administratoren | Originaldokumente & Quellreferenzen |
 | [JOBS.md](JOBS.md) | Entwickler, Administratoren | Job-System |
 | [EXPORT_IMPORT.md](EXPORT_IMPORT.md) | Administratoren | Export & Import |
 | [HTTPS.md](HTTPS.md) | Administratoren | TLS/Zertifikate |

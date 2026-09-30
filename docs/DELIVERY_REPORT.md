@@ -115,6 +115,61 @@ Darüber hinaus sind alle im Spec geforderten Funktionen umgesetzt.
 
 ---
 
+## ERWEITERUNG: ORIGINALDOKUMENTE (ext1)
+
+Stand: Migration `0002_document_blobs_versioning` wurde erfolgreich auf die
+laufende MariaDB angewendet und per `SHOW INDEX`/Spaltenprüfung verifiziert.
+Die Code-Integration (Datenmodell, Services, API-Controller, Frontend) ist
+vollständig implementiert, `php -l`/`node --check` sauber und die Unit-Tests
+laufen grün (47/47, inkl. Base64-Roundtrip, SHA-256, Ablehnung ungültiger
+Eingaben).
+
+```text
+ORIGINALDOKUMENTE
+=================
+Anzahl Originale:    0 (noch keine Blobs; Backfill ausstehend)
+Anzahl Versionen:    910 (nach 0002-Backfill)
+Originalspeicher:    0 Bytes
+Base64-Speicher:     0 Bytes
+
+REFERENZEN
+==========
+Dokumente mit Vektoren:          0 (vector_id noch nicht befüllt)
+Vektoren mit Dokumentreferenz:   0 (Milvus: altes autoID-Schema)
+Vektoren ohne Dokument:          0
+Dokumente ohne Vektoren:         910
+
+INTEGRITÄT
+==========
+Base64-Roundtrips:   47/47 Unit-Tests (Live-Roundtrip ausstehend)
+Hashfehler:          0
+Verwaiste Vektoren:  0
+Fehlende Blobs:      910 (Backfill/Reprocessing ausstehend)
+Fehlende Chunks:     0 (910 Chunks vorhanden, 0 mit vector_id)
+
+EXPORT/IMPORT
+=============
+Export getestet:    nicht ausgeführt (Code vorhanden, Live-Test ausstehend)
+Import getestet:    nicht ausgeführt
+Restore getestet:   nicht ausgeführt
+IDs erhalten:       nicht verifiziert (Live)
+Checksums geprüft:  nicht verifiziert (Live)
+
+ERGEBNIS
+========
+FAIL (End-to-End nicht abgeschlossen)
+```
+
+**Begründung:** Die Erweiterung ist implementiert und der risikoärmste Schritt
+(Migration) live verifiziert. Ein vollständiger End-to-End-Nachweis (Base64-
+Roundtrip gegen die Datenbank, MySQL ↔ Milvus-Bezug, Export → Import, Restore)
+steht noch aus, weil die laufende Umgebung noch das alte Milvus-Schema
+(`autoID=true`) und keine Blobs besitzt. Dafür ist ein Rebuild der Container mit
+dem aktuellen Code, die Neu-Erstellung der Milvus-Collections mit stabil-ID-
+Schema sowie ein Reprocessing der Bestandsdokumente erforderlich.
+
+---
+
 ## TESTERGEBNIS
 
-**PASS**
+**PASS** (Basis-Anwendung) / **FAIL** (ext1 End-to-End, siehe oben)

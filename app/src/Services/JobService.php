@@ -94,17 +94,20 @@ final class JobService
     /** Recompute aggregate counters for a job. */
     public function refreshCounters(int $id): void
     {
+        // Version-aware counters: the logical document set is counted by
+        // distinct `document_id`, while status/storage aggregates reflect the
+        // *current* version only (old versions are immutable history).
         $counts = Db::fetchOne(
             'SELECT
-                COUNT(*) AS documents_total,
-                SUM(processing_status = "DISCOVERED" OR processing_status = "PENDING") AS documents_pending,
-                SUM(processing_status = "PROCESSING") AS documents_processing,
-                SUM(processing_status = "COMPLETED") AS documents_processed,
-                SUM(processing_status = "FAILED") AS documents_failed,
-                SUM(chunk_count) AS chunks_total,
-                SUM(CASE WHEN processing_status = "COMPLETED" THEN chunk_count ELSE 0 END) AS vectors_total,
-                SUM(token_count_estimate) AS tokens_total,
-                SUM(file_size) AS bytes_total
+                COUNT(DISTINCT document_id) AS documents_total,
+                SUM(is_current = 1 AND (processing_status = "DISCOVERED" OR processing_status = "PENDING")) AS documents_pending,
+                SUM(is_current = 1 AND processing_status = "PROCESSING") AS documents_processing,
+                SUM(is_current = 1 AND processing_status = "COMPLETED") AS documents_processed,
+                SUM(is_current = 1 AND processing_status = "FAILED") AS documents_failed,
+                SUM(CASE WHEN is_current = 1 THEN chunk_count ELSE 0 END) AS chunks_total,
+                SUM(CASE WHEN is_current = 1 AND processing_status = "COMPLETED" THEN chunk_count ELSE 0 END) AS vectors_total,
+                SUM(CASE WHEN is_current = 1 THEN token_count_estimate ELSE 0 END) AS tokens_total,
+                SUM(CASE WHEN is_current = 1 THEN file_size ELSE 0 END) AS bytes_total
              FROM documents WHERE job_id = ?',
             [$id]
         );
