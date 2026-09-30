@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" viewBox="0 0 760 380" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:10px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <rect x="40" y="60" width="220" height="220" class="box" fill="#fef9c3"/>
+  <text x="150" y="85" text-anchor="middle" class="title">Milvus (standalone)</text>
+  <text x="150" y="103" text-anchor="middle" class="sub">milvusdb/milvus:v2.5.27</text>
+  <text x="150" y="121" text-anchor="middle" class="sub">embedded etcd · local storage</text>
+  <text x="150" y="145" text-anchor="middle" class="sub" font-weight="bold">Collection je Modell:</text>
+  <text x="52" y="165" class="sub">docvec_Qwen3-Embedding-0.6B</text>
+  <text x="52" y="181" class="sub">docvec_Qwen3-Embedding-4B</text>
+  <text x="52" y="197" class="sub">docvec_Qwen3-Embedding-8B</text>
+  <text x="150" y="220" text-anchor="middle" class="sub">Index: AUTOINDEX · COSINE</text>
+  <text x="150" y="238" text-anchor="middle" class="sub">Ports: 19530 · /healthz:9091</text>
+
+  <line x1="260" y1="150" x2="330" y2="150" class="arrow"/>
+
+  <rect x="330" y="60" width="200" height="150" class="box"/>
+  <text x="430" y="85" text-anchor="middle" class="title">Collection-Schema</text>
+  <text x="342" y="105" class="sub" font-weight="bold">document_id (VarChar, PK)</text>
+  <text x="342" y="121" class="sub" font-weight="bold">chunk_index (Int64)</text>
+  <text x="342" y="137" class="sub" font-weight="bold">vector (FloatVector)</text>
+  <text x="342" y="155" class="sub">  dim: 1024/2560/4096</text>
+  <text x="342" y="175" class="sub">Index: vector_idx · AUTOINDEX</text>
+  <text x="342" y="191" class="sub">metricType: COSINE</text>
+
+  <line x1="430" y1="210" x2="430" y2="260" class="arrow"/>
+
+  <rect x="330" y="260" width="200" height="90" class="box" fill="#dcfce7"/>
+  <text x="430" y="285" text-anchor="middle" class="title">Suche (POST /api/search)</text>
+  <text x="342" y="305" class="sub">Query → Embedding → Vektor</text>
+  <text x="342" y="321" class="sub">Cosinus-Ähnlichkeitssuche</text>
+  <text x="342" y="337" class="sub">→ document_id + chunk_index</text>
+</svg>

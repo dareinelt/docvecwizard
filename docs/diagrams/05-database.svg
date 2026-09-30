@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="500" viewBox="0 0 760 500" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .col { font-size:9.5px; fill:#334155; }
+    .arrow { stroke:#334155; stroke-width:1.3; fill:none; marker-end:url(#arr); }
+    .rel { font-size:9px; fill:#64748b; }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <rect x="40" y="60" width="210" height="150" class="box"/>
+  <text x="145" y="82" text-anchor="middle" class="title">jobs</text>
+  <text x="52" y="100" class="col">id PK · job_id UUID UNIQUE</text>
+  <text x="52" y="114" class="col">name · source_directory</text>
+  <text x="52" y="128" class="col">recursive · embedding_model</text>
+  <text x="52" y="142" class="col">embedding_dimension</text>
+  <text x="52" y="156" class="col">status (CREATED/…)</text>
+  <text x="52" y="170" class="col">documents_* · chunks_total</text>
+  <text x="52" y="184" class="col">vectors_total · tokens_total</text>
+  <text x="52" y="198" class="col">bytes_total · error_count</text>
+
+  <rect x="300" y="60" width="210" height="180" class="box"/>
+  <text x="405" y="82" text-anchor="middle" class="title">documents</text>
+  <text x="312" y="100" class="col">id PK · document_id UUID UNIQUE</text>
+  <text x="312" y="114" class="col">job_id FK → jobs.id</text>
+  <text x="312" y="128" class="col">source_path · relative_path</text>
+  <text x="312" y="142" class="col">filename · extension · mime</text>
+  <text x="312" y="156" class="col">file_size · file_hash (SHA-256)</text>
+  <text x="312" y="170" class="col">page_count · char/word_count</text>
+  <text x="312" y="184" class="col">token_count_estimate</text>
+  <text x="312" y="198" class="col">chunk_count · embedding_model</text>
+  <text x="312" y="212" class="col">embedding_dimension</text>
+  <text x="312" y="226" class="col">processing_status · error_message</text>
+
+  <rect x="560" y="60" width="185" height="150" class="box"/>
+  <text x="652" y="82" text-anchor="middle" class="title">document_chunks</text>
+  <text x="572" y="100" class="col">id PK · chunk_id UUID UNIQUE</text>
+  <text x="572" y="114" class="col">document_id FK → documents.id</text>
+  <text x="572" y="128" class="col">chunk_index · page_start/end</text>
+  <text x="572" y="142" class="col">text_length · token_count</text>
+  <text x="572" y="156" class="col">text (MEDIUMTEXT)</text>
+
+  <line x1="300" y1="140" x2="250" y2="140" class="arrow"/>
+  <text x="258" y="134" class="rel">1 : N</text>
+  <line x1="560" y1="120" x2="510" y2="120" class="arrow"/>
+  <text x="518" y="114" class="rel">1 : N</text>
+
+  <rect x="40" y="270" width="200" height="110" class="box"/>
+  <text x="140" y="292" text-anchor="middle" class="title">embedding_models</text>
+  <text x="52" y="310" class="col">id PK · name UNIQUE</text>
+  <text x="52" y="324" class="col">repo · parameters</text>
+  <text x="52" y="338" class="col">dimension · max_input_tokens</text>
+  <text x="52" y="352" class="col">normalization · distance_metric</text>
+  <text x="52" y="366" class="col">active</text>
+
+  <rect x="280" y="270" width="200" height="110" class="box"/>
+  <text x="380" y="292" text-anchor="middle" class="title">tls_certificates</text>
+  <text x="292" y="310" class="col">id PK · kind · common_name</text>
+  <text x="292" y="324" class="col">san · subject · issuer</text>
+  <text x="292" y="338" class="col">not_before/after · fingerprint</text>
+  <text x="292" y="352" class="col">key_type · private_key_enc</text>
+  <text x="292" y="366" class="col">csr_pem · cert_pem · active</text>
+
+  <rect x="520" y="270" width="220" height="110" class="box"/>
+  <text x="630" y="292" text-anchor="middle" class="title">exports</text>
+  <text x="532" y="310" class="col">id PK · export_id UUID UNIQUE</text>
+  <text x="532" y="324" class="col">filename · format (tar.zst)</text>
+  <text x="532" y="338" class="col">status · manifest · checksum</text>
+  <text x="532" y="352" class="col">file_size · finished_at</text>
+
+  <rect x="40" y="400" width="200" height="90" class="box"/>
+  <text x="140" y="422" text-anchor="middle" class="title">settings</text>
+  <text x="52" y="440" class="col">key PK · value</text>
+  <text x="52" y="454" class="col">updated_at</text>
+
+  <rect x="280" y="400" width="200" height="90" class="box"/>
+  <text x="380" y="422" text-anchor="middle" class="title">processing_errors</text>
+  <text x="292" y="440" class="col">id PK · job_id FK</text>
+  <text x="292" y="454" class="col">document_id FK · step · error</text>
+
+  <rect x="520" y="400" width="220" height="90" class="box"/>
+  <text x="630" y="422" text-anchor="middle" class="title">system_metrics / audit_log</text>
+  <text x="532" y="440" class="col">system_metrics: service, metric, value</text>
+  <text x="532" y="454" class="col">audit_log: action, entity, details</text>
+</svg>

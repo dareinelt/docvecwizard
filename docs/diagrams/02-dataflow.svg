@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:10px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+    .step { font-size:11px; fill:#0f172a; font-weight:bold; }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <rect x="20" y="120" width="130" height="60" class="box" fill="#dbeafe"/>
+  <text x="85" y="146" text-anchor="middle" class="title">Datei</text>
+  <text x="85" y="162" text-anchor="middle" class="sub">data/input/</text>
+
+  <rect x="185" y="120" width="130" height="60" class="box" fill="#fef9c3"/>
+  <text x="250" y="142" text-anchor="middle" class="title">Scan &amp; Dedupe</text>
+  <text x="250" y="160" text-anchor="middle" class="sub">SHA-256</text>
+
+  <rect x="350" y="120" width="130" height="60" class="box" fill="#fef9c3"/>
+  <text x="415" y="142" text-anchor="middle" class="title">Konvertierung</text>
+  <text x="415" y="160" text-anchor="middle" class="sub">converter → Text</text>
+
+  <rect x="515" y="120" width="130" height="60" class="box" fill="#fef9c3"/>
+  <text x="580" y="142" text-anchor="middle" class="title">Chunking</text>
+  <text x="580" y="160" text-anchor="middle" class="sub">Chunker (512/64)</text>
+
+  <rect x="680" y="120" width="70" height="60" class="box" fill="#dcfce7"/>
+  <text x="715" y="142" text-anchor="middle" class="title">Embed</text>
+  <text x="715" y="160" text-anchor="middle" class="sub">Qwen3</text>
+
+  <line x1="150" y1="150" x2="185" y2="150" class="arrow"/>
+  <line x1="315" y1="150" x2="350" y2="150" class="arrow"/>
+  <line x1="480" y1="150" x2="515" y2="150" class="arrow"/>
+  <line x1="645" y1="150" x2="680" y2="150" class="arrow"/>
+
+  <rect x="515" y="220" width="130" height="50" class="box"/>
+  <text x="580" y="242" text-anchor="middle" class="title">Milvus</text>
+  <text x="580" y="258" text-anchor="middle" class="sub">Vektoren</text>
+
+  <line x1="715" y1="180" x2="580" y2="220" class="arrow"/>
+
+  <text x="20" y="30" class="step">1</text><text x="36" y="30" class="sub">Datei liegt in data/input</text>
+  <text x="185" y="30" class="step">2</text><text x="201" y="30" class="sub">Worker scannt &amp; dedupliziert</text>
+  <text x="350" y="30" class="step">3</text><text x="366" y="30" class="sub">Konverter erzeugt Text</text>
+  <text x="515" y="30" class="step">4</text><text x="531" y="30" class="sub">Text wird in Chunks zerlegt</text>
+  <text x="680" y="30" class="step">5</text><text x="696" y="30" class="sub">Embedding erzeugt Vektoren</text>
+  <text x="515" y="250" class="step">6</text><text x="531" y="250" class="sub">Vektoren nach Milvus schreiben</text>
+</svg>

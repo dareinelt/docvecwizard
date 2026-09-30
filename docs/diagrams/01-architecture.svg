@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="560" viewBox="0 0 760 560" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:14px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:11px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+    text { font-family:Helvetica,Arial,sans-serif; }
+  </style>
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <rect x="270" y="20" width="220" height="60" class="box" fill="#dbeafe"/>
+  <text x="380" y="46" text-anchor="middle" class="title">Browser</text>
+  <text x="380" y="64" text-anchor="middle" class="sub">HTTPS · Port 8443</text>
+
+  <line x1="380" y1="80" x2="380" y2="120" class="arrow"/>
+  <text x="390" y="104" class="sub" font-size="10">HTTPS</text>
+
+  <rect x="250" y="120" width="260" height="60" class="box" fill="#dbeafe"/>
+  <text x="380" y="146" text-anchor="middle" class="title">web (nginx)</text>
+  <text x="380" y="164" text-anchor="middle" class="sub">TLS-Terminierung + statisches Frontend</text>
+
+  <line x1="380" y1="180" x2="380" y2="220" class="arrow"/>
+  <text x="390" y="204" class="sub" font-size="10">FastCGI</text>
+
+  <rect x="250" y="220" width="260" height="60" class="box" fill="#fef9c3"/>
+  <text x="380" y="246" text-anchor="middle" class="title">app (PHP-FPM)</text>
+  <text x="380" y="264" text-anchor="middle" class="sub">REST-API</text>
+
+  <line x1="300" y1="280" x2="150" y2="330" class="arrow"/>
+  <line x1="340" y1="280" x2="300" y2="330" class="arrow"/>
+  <line x1="420" y1="280" x2="470" y2="330" class="arrow"/>
+  <line x1="470" y1="280" x2="620" y2="330" class="arrow"/>
+
+  <rect x="60" y="330" width="180" height="60" class="box"/>
+  <text x="150" y="356" text-anchor="middle" class="title">db (MariaDB 11.4)</text>
+  <text x="150" y="374" text-anchor="middle" class="sub">Jobs · Dokumente · Statistik</text>
+
+  <rect x="240" y="330" width="180" height="60" class="box"/>
+  <text x="330" y="356" text-anchor="middle" class="title">milvus</text>
+  <text x="330" y="374" text-anchor="middle" class="sub">Vektordatenbank</text>
+
+  <rect x="420" y="330" width="180" height="60" class="box"/>
+  <text x="510" y="356" text-anchor="middle" class="title">embedding</text>
+  <text x="510" y="374" text-anchor="middle" class="sub">Qwen3-Embedding</text>
+
+  <rect x="600" y="330" width="150" height="60" class="box"/>
+  <text x="675" y="356" text-anchor="middle" class="title">converter</text>
+  <text x="675" y="374" text-anchor="middle" class="sub">PDF/DOCX/… → Text</text>
+
+  <line x1="330" y1="390" x2="330" y2="440" class="arrow"/>
+  <rect x="240" y="440" width="180" height="60" class="box" fill="#dcfce7"/>
+  <text x="330" y="466" text-anchor="middle" class="title">worker (PHP-CLI)</text>
+  <text x="330" y="484" text-anchor="middle" class="sub">asynchrone Job-Verarbeitung</text>
+
+  <rect x="20" y="440" width="760" height="90" fill="none" stroke="#94a3b8" stroke-dasharray="4" rx="6"/>
+  <text x="30" y="462" class="sub" font-size="10" fill="#64748b">internes Netzwerk „backend" (internal: true) — kein externer Zugriff</text>
+</svg>
