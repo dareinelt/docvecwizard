@@ -1,0 +1,29 @@
+# Environment / secrets
+.env
+
+# Generated TLS material
+web/ssl/
+*.key
+*.csr
+*.crt
+*.pem
+
+# Embedding models (downloaded as deployment step)
+embedding/models/*/
+embedding/models/*.json
+
+# Runtime data volumes
+storage/
+data/
+
+# Exports / temp
+exports/
+tmp/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Test artifacts
+tests/_output/
+coverage/

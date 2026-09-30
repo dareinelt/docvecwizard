@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Document Embedding Manager</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/css/app.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/assets/favicon.svg" alt="" width="28" height="28">
+        <div class="brand-text">
+          <strong>DocVec</strong>
+          <span>Embedding Manager</span>
+        </div>
+      </div>
+      <nav id="nav" class="nav">
+        <a href="#dashboard" data-view="dashboard" class="active">Dashboard</a>
+        <a href="#documents" data-view="documents">Dokumente</a>
+        <a href="#browse" data-view="browse">Ordner</a>
+        <a href="#jobs" data-view="jobs">Aufträge</a>
+        <a href="#search" data-view="search">Suche</a>
+        <a href="#collections" data-view="collections">Kollektionen</a>
+        <a href="#statistics" data-view="statistics">Statistiken</a>
+        <a href="#export" data-view="export">Export / Import</a>
+        <a href="#tls" data-view="tls">TLS-Zertifikat</a>
+        <a href="#settings" data-view="settings">Einstellungen</a>
+        <a href="#system" data-view="system">System</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="health-dot" class="dot dot-unknown" title="Verbindung"></span>
+        <span id="health-label">Verbinde…</span>
+      </div>
+    </aside>
+
+    <main class="content">
+      <header class="topbar">
+        <h1 id="view-title">Dashboard</h1>
+        <div class="topbar-actions">
+          <button id="refresh-btn" class="btn btn-ghost" title="Neu laden">↻ Aktualisieren</button>
+        </div>
+      </header>
+      <div id="view" class="view"><div class="spinner">Lade…</div></div>
+    </main>
+  </div>
+
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div id="modal" class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="modal-title"></h2>
+        <button id="modal-close" class="btn btn-ghost" aria-label="Schließen">✕</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-root" class="toast-root"></div>
+
+  <script src="/assets/js/app.js"></script>
+</body>
+</html>

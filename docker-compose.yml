@@ -1,0 +1,277 @@
+# =============================================================================
+# Document Embedding Manager - docker compose
+#
+# Fully offline-capable stack. Only the `web` service publishes a port (HTTPS).
+# MySQL, Milvus, Embedding and Converter are reachable only on internal
+# networks.
+#
+# Resource limits are deliberately documented here and kept conservative so the
+# stack also runs on a 16 GB / 8 CPU machine.
+# =============================================================================
+
+name: docvecwizard
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
+
+volumes:
+  db_data:
+  milvus_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # MySQL / MariaDB - configuration, jobs, documents, statistics
+  # ---------------------------------------------------------------------------
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${MYSQL_DATABASE}
+      MARIADB_USER: ${MYSQL_USER}
+      MARIADB_PASSWORD: ${MYSQL_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: ${APP_TIMEZONE}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max-allowed-packet=256M
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Migrate - one-shot schema migration (runs php app/bin/migrate.php, exits)
+  # ---------------------------------------------------------------------------
+  migrate:
+    build:
+      context: ./app
+    command: ["php", "/app/bin/migrate.php"]
+    restart: "no"
+    environment:
+      APP_VERSION: ${APP_VERSION}
+      APP_TIMEZONE: ${APP_TIMEZONE}
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      LOG_LEVEL: ${LOG_LEVEL}
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 256m
+
+  # ---------------------------------------------------------------------------
+  # Milvus - vector database (standalone, embedded etcd, local storage)
+  # ---------------------------------------------------------------------------
+  milvus:
+    image: milvusdb/milvus:v2.5.27
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      COMMON_STORAGETYPE: local
+      TZ: ${APP_TIMEZONE}
+    volumes:
+      - milvus_data:/var/lib/milvus
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 40s
+    mem_limit: 2g
+
+  # ---------------------------------------------------------------------------
+  # Embedding service - Qwen3 embeddings (independent Python process)
+  # ---------------------------------------------------------------------------
+  embedding:
+    build:
+      context: ./embedding
+    restart: unless-stopped
+    environment:
+      EMBEDDING_MODELS: ${EMBEDDING_MODELS:-Qwen3-Embedding-0.6B}
+      EMBEDDING_DEFAULT_MODEL: ${EMBEDDING_DEFAULT_MODEL:-Qwen3-Embedding-0.6B}
+      MODELS_DIR: /models
+      HF_HOME: /models/.cache
+      TZ: ${APP_TIMEZONE}
+    volumes:
+      - ./embedding/models:/models
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+    mem_limit: 8g
+    cpus: 6
+
+  # ---------------------------------------------------------------------------
+  # Document converter - PDF/DOCX/PPTX/... -> text/markdown
+  # ---------------------------------------------------------------------------
+  converter:
+    build:
+      context: ./converter
+    restart: unless-stopped
+    environment:
+      INPUT_ROOT: ${INPUT_ROOT}
+      STAGING_ROOT: ${STAGING_ROOT}
+      CONVERT_TIMEOUT: ${CONVERT_TIMEOUT:-300}
+      TZ: ${APP_TIMEZONE}
+    volumes:
+      - ${DATA_DIR:-./data}/input:/srv/data/input:ro
+      - ${DATA_DIR:-./data}/staging:/srv/data/staging
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    mem_limit: 2g
+
+  # ---------------------------------------------------------------------------
+  # App - PHP (FPM) REST API backend
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: ./app
+    restart: unless-stopped
+    environment:
+      APP_VERSION: ${APP_VERSION}
+      APP_NAME: ${APP_NAME}
+      APP_TIMEZONE: ${APP_TIMEZONE}
+      APP_HOSTNAMES: ${APP_HOSTNAMES}
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MILVUS_HOST: ${MILVUS_HOST}
+      MILVUS_PORT: ${MILVUS_PORT}
+      MILVUS_METRICS_PORT: ${MILVUS_METRICS_PORT}
+      EMBEDDING_HOST: ${EMBEDDING_HOST}
+      EMBEDDING_PORT: ${EMBEDDING_PORT}
+      CONVERTER_HOST: ${CONVERTER_HOST}
+      CONVERTER_PORT: ${CONVERTER_PORT}
+      INPUT_ROOT: ${INPUT_ROOT}
+      STAGING_ROOT: ${STAGING_ROOT}
+      EXPORT_ROOT: /srv/data/exports
+      UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE}
+      SESSION_SECRET: ${SESSION_SECRET}
+      CSRF_SECRET: ${CSRF_SECRET}
+      LOG_LEVEL: ${LOG_LEVEL}
+    volumes:
+      - ${DATA_DIR:-./data}/input:/srv/data/input
+      - ${DATA_DIR:-./data}/staging:/srv/data/staging
+      - ${DATA_DIR:-./data}/exports:/srv/data/exports
+      - ./web/ssl:/srv/ssl
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "php", "/app/bin/healthcheck.php"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Worker - PHP CLI job processor
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: ./app
+    restart: unless-stopped
+    command: ["php", "/app/bin/worker.php"]
+    environment:
+      APP_VERSION: ${APP_VERSION}
+      APP_TIMEZONE: ${APP_TIMEZONE}
+      MYSQL_HOST: db
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MILVUS_HOST: ${MILVUS_HOST}
+      MILVUS_PORT: ${MILVUS_PORT}
+      MILVUS_METRICS_PORT: ${MILVUS_METRICS_PORT}
+      EMBEDDING_HOST: ${EMBEDDING_HOST}
+      EMBEDDING_PORT: ${EMBEDDING_PORT}
+      CONVERTER_HOST: ${CONVERTER_HOST}
+      CONVERTER_PORT: ${CONVERTER_PORT}
+      INPUT_ROOT: ${INPUT_ROOT}
+      STAGING_ROOT: ${STAGING_ROOT}
+      EXPORT_ROOT: /srv/data/exports
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE}
+      WORKER_LOCK_TIMEOUT: ${WORKER_LOCK_TIMEOUT}
+      CHUNK_SIZE_TOKENS: ${CHUNK_SIZE_TOKENS}
+      CHUNK_OVERLAP_TOKENS: ${CHUNK_OVERLAP_TOKENS}
+      CHUNK_MIN_TOKENS: ${CHUNK_MIN_TOKENS}
+      CHUNK_MAX_TOKENS: ${CHUNK_MAX_TOKENS}
+      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-16}
+      LOG_LEVEL: ${LOG_LEVEL}
+    volumes:
+      - ${DATA_DIR:-./data}/input:/srv/data/input
+      - ${DATA_DIR:-./data}/staging:/srv/data/staging
+      - ${DATA_DIR:-./data}/exports:/srv/data/exports
+    networks:
+      - backend
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      embedding:
+        condition: service_healthy
+    stop_grace_period: 60s
+    mem_limit: 512m
+
+  # ---------------------------------------------------------------------------
+  # Web - nginx TLS terminator + static frontend
+  # ---------------------------------------------------------------------------
+  web:
+    build:
+      context: ./web
+    restart: unless-stopped
+    environment:
+      APP_HOSTNAMES: ${APP_HOSTNAMES}
+    ports:
+      - "${HTTPS_PORT}:443"
+    volumes:
+      - ./web/ssl:/etc/nginx/ssl
+    networks:
+      - frontend
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-skf", "https://localhost/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    mem_limit: 64m
