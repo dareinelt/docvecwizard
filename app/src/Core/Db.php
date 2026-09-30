@@ -25,6 +25,10 @@ final class Db
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES => false,
+            // Pin the session time zone to UTC so that DEFAULT CURRENT_TIMESTAMP
+            // / ON UPDATE CURRENT_TIMESTAMP / NOW() agree with the UTC values
+            // written by the application via gmdate().
+            PDO::MYSQL_ATTR_INIT_COMMAND => "SET time_zone = '+00:00'",
         ]);
 
         return self::$pdo;
