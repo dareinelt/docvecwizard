@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="340" viewBox="0 0 760 340" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:10px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+    .status { font-size:12px; font-weight:bold; }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <rect x="40" y="140" width="150" height="60" class="box"/>
+  <text x="115" y="166" text-anchor="middle" class="title">DISCOVERED</text>
+  <text x="115" y="184" text-anchor="middle" class="sub">Datei erkannt (SHA-256)</text>
+
+  <rect x="290" y="140" width="150" height="60" class="box" fill="#fef9c3"/>
+  <text x="365" y="166" text-anchor="middle" class="title">PROCESSING</text>
+  <text x="365" y="184" text-anchor="middle" class="sub">Konvertieren → Chunk → Embed</text>
+
+  <rect x="540" y="100" width="150" height="60" class="box" fill="#dcfce7"/>
+  <text x="615" y="126" text-anchor="middle" class="title">COMPLETED</text>
+  <text x="615" y="144" text-anchor="middle" class="sub">indiziert, Vektor in Milvus</text>
+
+  <rect x="540" y="200" width="150" height="60" class="box" fill="#fee2e2"/>
+  <text x="615" y="226" text-anchor="middle" class="title">FAILED</text>
+  <text x="615" y="244" text-anchor="middle" class="sub">error_message gesetzt</text>
+
+  <line x1="190" y1="170" x2="290" y2="170" class="arrow"/>
+  <line x1="440" y1="160" x2="540" y2="130" class="arrow"/>
+  <line x1="440" y1="175" x2="540" y2="230" class="arrow"/>
+
+  <text x="40" y="40" class="title" font-size="15">Dokumentenverarbeitungs-Pipeline</text>
+  <text x="40" y="60" class="sub">1. converter: PDF/DOCX/PPTX/XLSX/HTML/EPUB/… → Text/Markdown (Pandoc, LibreOffice, Poppler)</text>
+  <text x="40" y="76" class="sub">2. Chunker: überlappende Chunks (512 Tokens, 64 Überlappung, hartes Limit 1024)</text>
+  <text x="40" y="92" class="sub">3. embedding: Qwen3 erzeugt Vektoren (letztes-Token-Pooling, L2-Norm)</text>
+  <text x="40" y="108" class="sub">4. Milvus: Vektor-Insert in Collection docvec_&lt;modell&gt;</text>
+
+  <rect x="40" y="270" width="650" height="50" fill="none" stroke="#94a3b8" stroke-dasharray="4" rx="6"/>
+  <text x="55" y="292" class="sub">Metadaten: page_count, character_count, word_count, token_count_estimate, chunk_count</text>
+  <text x="55" y="308" class="sub">Deduplizierung über file_hash (SHA-256) · Fehler in processing_errors</text>
+</svg>

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="340" viewBox="0 0 760 340" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:10px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <text x="40" y="40" class="title" font-size="16">Export</text>
+  <rect x="40" y="60" width="180" height="60" class="box" fill="#fef9c3"/>
+  <text x="130" y="86" text-anchor="middle" class="title">POST /api/exports</text>
+  <text x="130" y="104" text-anchor="middle" class="sub">Sammelt Dokumente + Chunks</text>
+
+  <rect x="270" y="60" width="180" height="60" class="box" fill="#fef9c3"/>
+  <text x="360" y="86" text-anchor="middle" class="title">Archiv erstellen</text>
+  <text x="360" y="104" text-anchor="middle" class="sub">tar.zst (Zstandard)</text>
+
+  <rect x="500" y="60" width="180" height="60" class="box" fill="#dcfce7"/>
+  <text x="590" y="86" text-anchor="middle" class="title">GET …/download</text>
+  <text x="590" y="104" text-anchor="middle" class="sub">Download des Archivs</text>
+
+  <line x1="220" y1="90" x2="270" y2="90" class="arrow"/>
+  <line x1="450" y1="90" x2="500" y2="90" class="arrow"/>
+
+  <text x="40" y="180" class="title" font-size="16">Import</text>
+  <rect x="40" y="200" width="180" height="60" class="box" fill="#fef9c3"/>
+  <text x="130" y="226" text-anchor="middle" class="title">POST /api/import</text>
+  <text x="130" y="244" text-anchor="middle" class="sub">tar.zst hochladen</text>
+
+  <rect x="270" y="200" width="180" height="60" class="box" fill="#fef9c3"/>
+  <text x="360" y="226" text-anchor="middle" class="title">Validieren</text>
+  <text x="360" y="244" text-anchor="middle" class="sub">Manifest + SHA-256</text>
+
+  <rect x="500" y="200" width="180" height="60" class="box" fill="#dcfce7"/>
+  <text x="590" y="226" text-anchor="middle" class="title">Wiederherstellen</text>
+  <text x="590" y="244" text-anchor="middle" class="sub">DB + Vektoren + Dateien</text>
+
+  <line x1="220" y1="230" x2="270" y2="230" class="arrow"/>
+  <line x1="450" y1="230" x2="500" y2="230" class="arrow"/>
+
+  <rect x="40" y="290" width="640" height="40" fill="none" stroke="#94a3b8" stroke-dasharray="4" rx="6"/>
+  <text x="55" y="314" class="sub">Offline-Austausch: vollständiger Dokumentenbestand inkl. Vektoren und Metadaten als einzelnes Archiv</text>
+</svg>

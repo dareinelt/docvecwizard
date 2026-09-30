@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="320" viewBox="0 0 760 320" font-family="Helvetica, Arial, sans-serif">
+  <style>
+    .box { fill:#eef2f7; stroke:#334155; stroke-width:1.5; rx:6; }
+    .title { font-size:13px; font-weight:bold; fill:#0f172a; }
+    .sub { font-size:10px; fill:#475569; }
+    .arrow { stroke:#334155; stroke-width:1.5; fill:none; marker-end:url(#arr); }
+  </style>
+  <defs><marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#334155"/></marker></defs>
+
+  <rect x="40" y="120" width="150" height="60" class="box" fill="#dbeafe"/>
+  <text x="115" y="146" text-anchor="middle" class="title">Browser</text>
+  <text x="115" y="162" text-anchor="middle" class="sub">https://localhost:8443</text>
+
+  <rect x="290" y="120" width="170" height="60" class="box" fill="#fef9c3"/>
+  <text x="375" y="146" text-anchor="middle" class="title">nginx (TLS-Terminierung)</text>
+  <text x="375" y="162" text-anchor="middle" class="sub">Port 8443 → 443</text>
+
+  <rect x="560" y="120" width="150" height="60" class="box" fill="#dcfce7"/>
+  <text x="635" y="146" text-anchor="middle" class="title">PHP-FPM</text>
+  <text x="635" y="162" text-anchor="middle" class="sub">app (intern)</text>
+
+  <line x1="190" y1="150" x2="290" y2="150" class="arrow"/>
+  <line x1="460" y1="150" x2="560" y2="150" class="arrow"/>
+
+  <rect x="40" y="240" width="300" height="60" class="box"/>
+  <text x="190" y="262" text-anchor="middle" class="title">TlsService (self-signed)</text>
+  <text x="190" y="280" text-anchor="middle" class="sub">Eigene CA → Server-Zertifikat (SAN: localhost)</text>
+
+  <rect x="400" y="240" width="300" height="60" class="box"/>
+  <text x="550" y="262" text-anchor="middle" class="title">web/ssl/cert.pem + key.pem</text>
+  <text x="550" y="280" text-anchor="middle" class="sub">2048-Bit RSA · 825 Tage gültig</text>
+
+  <line x1="340" y1="270" x2="400" y2="270" class="arrow"/>
+
+  <text x="40" y="40" class="title" font-size="16">HTTPS-Workflow</text>
+  <text x="40" y="60" class="sub">1. POST /api/tls/selfsigned erzeugt Zertifikat</text>
+  <text x="40" y="78" class="sub">2. POST /api/tls/{id}/activate aktiviert es · nginx wird neu geladen</text>
+  <text x="40" y="96" class="sub">3. Zertifikate werden in der DB (tls_certificates) gespeichert</text>
+</svg>
