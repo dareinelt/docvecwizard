@@ -64,7 +64,7 @@
   <rect x="520" y="270" width="220" height="110" class="box"/>
   <text x="630" y="292" text-anchor="middle" class="title">exports</text>
   <text x="532" y="310" class="col">id PK · export_id UUID UNIQUE</text>
-  <text x="532" y="324" class="col">filename · format (tar.zst)</text>
+  <text x="532" y="324" class="col">filename · format (tar.gz)</text>
   <text x="532" y="338" class="col">status · manifest · checksum</text>
   <text x="532" y="352" class="col">file_size · finished_at</text>
 

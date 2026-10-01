@@ -120,9 +120,22 @@ test('Milvus: create/insert/flush/search/drop round-trip', function (): void {
 
         $vector = array_fill(0, $dim, 0.0);
         $vector[0] = 1.0;
+        // The stable-ID schema (autoID=false) requires the full field set; a
+        // partial row fails with Milvus "Int64" parse errors on missing fields.
         $milvus->insert($collection, [[
+            'id' => 'itest-vec-' . substr(md5((string) mt_rand()), 0, 8),
             'document_id' => 'itest-doc',
+            'document_version_id' => 'itest-ver',
+            'chunk_id' => 'itest-chunk',
+            'job_id' => 'itest-job',
+            'source_path' => '/srv/data/input/fixtures/sample.txt',
+            'filename' => 'sample.txt',
+            'document_hash' => str_repeat('a', 64),
+            'embedding_model' => (string) $model['name'],
+            'embedding_dimension' => $dim,
             'chunk_index' => 0,
+            'page_start' => 0,
+            'page_end' => 0,
             'vector' => $vector,
         ]]);
         $milvus->flush($collection);

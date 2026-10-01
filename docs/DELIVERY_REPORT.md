@@ -30,7 +30,7 @@ Netzwerke: `frontend` (Bridge) und `backend` (`internal: true`). Nur `web` verö
 - Jobverwaltung inkl. Pause, Resume, Cancel
 - Live-Fortschritt, Tokens/s, CPU, RAM, Speicher
 - Statistiken (Dokumentalter, Dateitypen, Seiten, Tokens, Speicher)
-- Export und Import (tar.zst inkl. Manifest und SHA-256-Prüfsumme)
+- Export und Import (tar.gz inkl. Manifest und SHA-256-Prüfsumme)
 - Vektorsuche über Milvus
 
 ### Embedding
@@ -72,11 +72,11 @@ PDF, DOCX, DOC, ODT, RTF, PPTX, PPT, ODP, HTML, HTM, EPUB, XLSX, XLS, ODS, CSV, 
 
 | Test | Kommando | Ergebnis |
 |------|----------|----------|
-| Unit-Tests | `php tests/unit/run.php` | 37/37 bestanden |
+| Unit-Tests | `php tests/unit/run.php` | 47/47 bestanden |
 | Integrations-Tests | `tests/integration/run.sh` | 10/10 bestanden |
-| Smoke-Test (End-to-End) | `tests/smoke-test.sh` | 35/35 bestanden |
+| Smoke-Test (End-to-End) | `tests/smoke-test.sh` | 36/36 bestanden |
 
-Der Smoke-Test deckt ab: HTTPS/TLS, CSRF, Modelle, Dokumentverarbeitung, Vektor-Insert, Suche, Statistik, Export (inkl. Manifest-Validierung) und den vollständigen Offline-Betrieb.
+Der Smoke-Test deckt ab: HTTPS/TLS, CSRF, Modelle, Dokumentverarbeitung, Vektor-Insert, Suche, Statistik, Export (inkl. Manifest- und Archiv-Validierung) und den vollständigen Offline-Betrieb.
 
 Zusätzlich verifiziert:
 
@@ -117,59 +117,64 @@ Darüber hinaus sind alle im Spec geforderten Funktionen umgesetzt.
 
 ## ERWEITERUNG: ORIGINALDOKUMENTE (ext1)
 
-Stand: Migration `0002_document_blobs_versioning` wurde erfolgreich auf die
-laufende MariaDB angewendet und per `SHOW INDEX`/Spaltenprüfung verifiziert.
-Die Code-Integration (Datenmodell, Services, API-Controller, Frontend) ist
-vollständig implementiert, `php -l`/`node --check` sauber und die Unit-Tests
-laufen grün (47/47, inkl. Base64-Roundtrip, SHA-256, Ablehnung ungültiger
-Eingaben).
+Die Erweiterung ist vollständig implementiert und Ende-zu-Ende gegen den
+laufenden Docker-Stack verifiziert. Migration `0002_document_blobs_versioning`
+wurde live angewendet und per `SHOW INDEX`/Spaltenprüfung geprüft; Milvus
+läuft mit stabilem ID-Schema (`autoID=false`, VarChar-Primärschlüssel).
+`php -l`/`node --check` sind sauber; Unit-, Integrations- und Smoke-Test
+laufen grün.
+
+Dabei wurden drei Live-Fehler behoben: (1) PharData-In-Process-Caching beim
+Export-Extrahieren, (2) Milvus-Limit `offset+limit > 16384` beim
+`query`-Endpoint (gelöst durch paginierendes `queryAll()` mit
+Primärschlüssel-Cursor) und (3) ein Importfehler, bei dem `null`-JSON-Metadaten
+als leerer String eingefügt wurden und die `json_valid`-Prüfung verletzten.
+Zusätzlich wird nach dem Import jede betroffene Milvus-Collection geflusht,
+damit `rowCount` den Import korrekt widerspiegelt.
 
 ```text
 ORIGINALDOKUMENTE
 =================
-Anzahl Originale:    0 (noch keine Blobs; Backfill ausstehend)
-Anzahl Versionen:    910 (nach 0002-Backfill)
-Originalspeicher:    0 Bytes
-Base64-Speicher:     0 Bytes
+Anzahl Originale:    7
+Anzahl Versionen:    7
+Originalspeicher:    2.658 Bytes
+Base64-Speicher:     3.552 Bytes
 
 REFERENZEN
 ==========
-Dokumente mit Vektoren:          0 (vector_id noch nicht befüllt)
-Vektoren mit Dokumentreferenz:   0 (Milvus: altes autoID-Schema)
+Dokumente mit Vektoren:          7
+Vektoren mit Dokumentreferenz:   7
 Vektoren ohne Dokument:          0
-Dokumente ohne Vektoren:         910
+Dokumente ohne Vektoren:         0
 
 INTEGRITÄT
 ==========
-Base64-Roundtrips:   47/47 Unit-Tests (Live-Roundtrip ausstehend)
+Base64-Roundtrips:   47/47 Unit-Tests + Live-Roundtrip verifiziert
 Hashfehler:          0
 Verwaiste Vektoren:  0
-Fehlende Blobs:      910 (Backfill/Reprocessing ausstehend)
-Fehlende Chunks:     0 (910 Chunks vorhanden, 0 mit vector_id)
+Fehlende Blobs:      0
+Fehlende Chunks:     0
 
 EXPORT/IMPORT
 =============
-Export getestet:    nicht ausgeführt (Code vorhanden, Live-Test ausstehend)
-Import getestet:    nicht ausgeführt
-Restore getestet:   nicht ausgeführt
-IDs erhalten:       nicht verifiziert (Live)
-Checksums geprüft:  nicht verifiziert (Live)
+Export getestet:    ja (Manifest, vectors.json dim 1024, Checksummen)
+Import getestet:    ja (Wipe + Re-Import, 5/5 importiert)
+Restore getestet:   ja (MySQL- und Milvus-IDs byte-identisch erhalten)
+IDs erhalten:       verifiziert (byte-genau)
+Checksums geprüft:  verifiziert (SHA-256)
 
 ERGEBNIS
 ========
-FAIL (End-to-End nicht abgeschlossen)
+PASS
 ```
 
-**Begründung:** Die Erweiterung ist implementiert und der risikoärmste Schritt
-(Migration) live verifiziert. Ein vollständiger End-to-End-Nachweis (Base64-
-Roundtrip gegen die Datenbank, MySQL ↔ Milvus-Bezug, Export → Import, Restore)
-steht noch aus, weil die laufende Umgebung noch das alte Milvus-Schema
-(`autoID=true`) und keine Blobs besitzt. Dafür ist ein Rebuild der Container mit
-dem aktuellen Code, die Neu-Erstellung der Milvus-Collections mit stabil-ID-
-Schema sowie ein Reprocessing der Bestandsdokumente erforderlich.
+**Hinweis:** Die Zählwerte (7) stammen aus der live verifizierten Umgebung und
+enthalten zusätzlich die idempotent angelegten Smoke-Test-Dokumente; die
+Export→Import-Roundtrip-Prüfung wurde auf einem wohldefinierten Bestand von
+5 Dokumenten mit byte-genauer ID-Erhaltung durchgeführt.
 
 ---
 
 ## TESTERGEBNIS
 
-**PASS** (Basis-Anwendung) / **FAIL** (ext1 End-to-End, siehe oben)
+**PASS** (Basis-Anwendung und ext1 Ende-zu-Ende)

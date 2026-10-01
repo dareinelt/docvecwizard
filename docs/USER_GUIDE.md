@@ -72,9 +72,8 @@ In **Dokumente**:
 
 1. Öffnen Sie **Export / Import**.
 2. Klicken Sie auf **Export erstellen**.
-3. Wählen Sie ein Format (Standard: `tar.zst`).
-4. Warten Sie, bis der Export den Status `COMPLETED` erreicht.
-5. Laden Sie die Datei über **Herunterladen**.
+3. Warten Sie, bis der Export den Status `COMPLETED` erreicht.
+4. Laden Sie die Datei über **Herunterladen** (Format: `tar.gz`).
 
 Siehe [EXPORT_IMPORT.md](EXPORT_IMPORT.md) für Details.
 

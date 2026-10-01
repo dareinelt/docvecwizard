@@ -26,6 +26,13 @@ final class MilvusClient
      *
      * @var list<string>
      */
+    /**
+     * Milvus caps `offset + limit` at the `maxQueryResultWindow` (16384).
+     * Queries requesting a larger window fail with error 65535, so pagination
+     * must stay within this bound and use a primary-key cursor instead.
+     */
+    public const MAX_QUERY_LIMIT = 16384;
+
     public const OUTPUT_FIELDS = [
         'id',
         'document_id',
@@ -212,13 +219,47 @@ final class MilvusClient
     }
 
     /**
+     * Query all entities matching a filter, transparently paginating with a
+     * primary-key cursor so the Milvus `maxQueryResultWindow` (16384) is never
+     * exceeded. Milvus `query` returns entities in primary-key order, so
+     * `id > <last-seen-id>` is a safe, stable cursor.
+     *
+     * @param list<string> $outputFields
+     * @return list<array<string,mixed>>
+     */
+    public function queryAll(string $collection, string $filter, array $outputFields): array
+    {
+        $all = [];
+        $lastId = null;
+
+        do {
+            $cursorFilter = $filter;
+            if ($lastId !== null) {
+                $cursorFilter = sprintf('(%s) && (id > "%s")', $filter, $lastId);
+            }
+
+            $rows = $this->query($collection, $cursorFilter, $outputFields, self::MAX_QUERY_LIMIT, 0);
+            $all = array_merge($all, $rows);
+
+            if (count($rows) < self::MAX_QUERY_LIMIT) {
+                break;
+            }
+
+            $lastId = (string) ($rows[count($rows) - 1]['id'] ?? '');
+            if ($lastId === '') {
+                break;
+            }
+        } while (true);
+
+        return $all;
+    }
+
+    /**
      * Count entities matching a boolean filter expression.
      */
     public function count(string $collection, string $filter): int
     {
-        $rows = $this->query($collection, $filter, ['id'], 100000);
-
-        return count($rows);
+        return count($this->queryAll($collection, $filter, ['id']));
     }
 
     public function deleteByFilter(string $collection, string $filter): void

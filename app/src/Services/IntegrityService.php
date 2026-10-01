@@ -186,22 +186,7 @@ final class IntegrityService
     /** @return list<array<string,mixed>> */
     private function queryAll(MilvusClient $milvus, string $collection, array $fields): array
     {
-        $out = [];
-        $offset = 0;
-        $batch = 10000;
-        while (true) {
-            $rows = $milvus->query($collection, 'id != ""', $fields, $batch, $offset);
-            if ($rows === []) {
-                break;
-            }
-            $out = array_merge($out, $rows);
-            $offset += count($rows);
-            if (count($rows) < $batch) {
-                break;
-            }
-        }
-
-        return $out;
+        return $milvus->queryAll($collection, 'id != ""', $fields);
     }
 
     /** @param list<string> $collections @param list<array<string,mixed>> $issues */

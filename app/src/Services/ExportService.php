@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Core\Config;
 use App\Core\Db;
+use App\Core\Logger;
 use App\Core\Uuid;
 
 /**
@@ -123,7 +124,7 @@ final class ExportService
             if ($vectorsExported && (int) $doc['chunk_count'] > 0 && $doc['embedding_model'] !== '') {
                 $collection = MilvusClient::collectionFor((string) $doc['embedding_model']);
                 try {
-                    $vectors = $milvus->query($collection, sprintf('document_version_id == "%s"', $versionId), array_merge(MilvusClient::OUTPUT_FIELDS, ['vector']), 100000);
+                    $vectors = $milvus->queryAll($collection, sprintf('document_version_id == "%s"', $versionId), array_merge(MilvusClient::OUTPUT_FIELDS, ['vector']));
                     file_put_contents($dir . '/vectors.json', json_encode($vectors, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
                     $vectorTotal += count($vectors);
                 } catch (\Throwable) {
@@ -154,10 +155,7 @@ final class ExportService
         // ---- Config ----
         $this->ensureDir($tmp . '/config');
         $this->writeJson($tmp . '/config/embedding-models.json', $models);
-        $manifest['embedding_models'] = array_map(
-            static fn (array $m): string => (string) $m['name'],
-            array_values(array_filter($models, static fn (array $m): bool => (int) ($m['active'] ?? 0) === 1))
-        );
+        $manifest['embedding_models'] = $this->usedEmbeddingModels($models, $documents);
 
         // ---- Manifest + checksums ----
         $this->writeJson($tmp . '/manifest.json', $manifest);
@@ -290,6 +288,36 @@ final class ExportService
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
         }
+    }
+
+    /**
+     * Names of embedding models represented by an export: the union of the
+     * models actually referenced by exported documents and any model flagged
+     * active in the catalog. This keeps the manifest accurate even when the
+     * `active` flag has not been maintained in the source database.
+     *
+     * @param list<array<string,mixed>> $models
+     * @param list<array<string,mixed>> $documents
+     * @return list<string>
+     */
+    private function usedEmbeddingModels(array $models, array $documents): array
+    {
+        $names = [];
+        foreach ($models as $m) {
+            if ((int) ($m['active'] ?? 0) === 1) {
+                $names[(string) $m['name']] = true;
+            }
+        }
+        foreach ($documents as $d) {
+            $name = trim((string) ($d['embedding_model'] ?? ''));
+            if ($name !== '') {
+                $names[$name] = true;
+            }
+        }
+        $result = array_keys($names);
+        sort($result);
+
+        return $result;
     }
 
     private function writeChecksums(string $tmp): void
@@ -474,8 +502,21 @@ final class ExportService
     {
         $tmp = $this->exportRoot() . '/.import_' . Uuid::v4();
         $this->ensureDir($tmp);
-        $phar = new \PharData($archive);
-        $phar->extractTo($tmp, null, true);
+
+        // PharData caches opened archives by path. Re-opening a path that was
+        // just produced by buildFromDirectory()+compress() in the same process
+        // can yield empty file contents. Extract from a uniquely-named copy so
+        // the archive is always read fresh from disk.
+        $copy = $this->exportRoot() . '/.archive_' . Uuid::v4() . '.tar.gz';
+        if (!copy($archive, $copy)) {
+            throw new \RuntimeException('Failed to stage archive for extraction');
+        }
+        try {
+            $phar = new \PharData($copy);
+            $phar->extractTo($tmp, null, true);
+        } finally {
+            @unlink($copy);
+        }
 
         return $tmp;
     }
@@ -495,6 +536,7 @@ final class ExportService
         }
 
         $milvus = new MilvusClient();
+        $touchedCollections = [];
         foreach (scandir($docsDir) ?: [] as $entry) {
             if ($entry === '.' || $entry === '..' || !is_dir($docsDir . '/' . $entry)) {
                 continue;
@@ -533,6 +575,25 @@ final class ExportService
 
             $this->importVersion($metadata, $documentId, $versionId, $hash, $base64, $chunks, $vectors, $milvus);
             $result['imported']++;
+
+            if ($vectors !== [] && ($metadata['embedding_model'] ?? '') !== '') {
+                $touchedCollections[MilvusClient::collectionFor((string) $metadata['embedding_model'])] = true;
+            }
+        }
+
+        // Flush each collection once so imported vectors move into sealed
+        // segments and become visible to stats (Milvus rowCount only reflects
+        // flushed segments). Best-effort: a failed flush must not fail an
+        // otherwise successful import, and search already sees growing segments.
+        foreach (array_keys($touchedCollections) as $collection) {
+            try {
+                $milvus->flush($collection);
+            } catch (\Throwable $e) {
+                Logger::channel('import')->warning('collection flush failed', [
+                    'collection' => $collection,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
 
         return $result;
@@ -590,6 +651,11 @@ final class ExportService
             );
             $blobId = Db::insertId();
 
+            $metadata = $meta['metadata'] ?? null;
+            $metadataJson = $metadata === null
+                ? null
+                : (is_array($metadata) ? json_encode($metadata, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : (string) $metadata);
+
             Db::execute(
                 'INSERT INTO documents (document_id, document_version_id, version, is_current, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, blob_id, created_at, modified_at, indexed_at, page_count, character_count, word_count, token_count_estimate, chunk_count, embedding_model, embedding_dimension, processing_status, processing_duration, error_message, metadata)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -620,7 +686,7 @@ final class ExportService
                     (string) ($meta['processing_status'] ?? 'IMPORTED'),
                     (int) ($meta['processing_duration'] ?? 0),
                     (string) ($meta['error_message'] ?? ''),
-                    is_array($meta['metadata'] ?? null) ? json_encode($meta['metadata'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : (string) ($meta['metadata'] ?? ''),
+                    $metadataJson,
                 ]
             );
             $rowId = Db::insertId();

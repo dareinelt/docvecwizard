@@ -228,8 +228,12 @@ check "export created" "test -n '$EXPORT_ID'"
 if [ -n "$EXPORT_ID" ]; then
   check "export downloads as a gzip archive" \
     "curl -sk -o '$EXPORT_FILE' -b '$COOKIE_JAR' -c '$COOKIE_JAR' -H 'x-csrf-token: ${CSRF_TOKEN:-}' '$BASE_URL/api/exports/$EXPORT_ID/download' && tar -tzf '$EXPORT_FILE' >/dev/null 2>&1"
-  check "export manifest is valid JSON with documents" \
-    "tar -xzOf '$EXPORT_FILE' manifest.json 2>/dev/null | jq -e '.documents | type == \"array\"'"
+  # ext1 export format: manifest.json carries a numeric documents count; the
+  # full per-version document payloads live in mysql/documents.json.
+  check "export manifest is valid JSON with document count" \
+    "tar -xzOf '$EXPORT_FILE' manifest.json 2>/dev/null | jq -e '.documents | type == \"number\"'"
+  check "export archive contains documents payload" \
+    "tar -xzOf '$EXPORT_FILE' mysql/documents.json 2>/dev/null | jq -e 'type == \"array\"'"
 fi
 
 # ---------------------------------------------------------------------------
