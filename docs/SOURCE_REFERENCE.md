@@ -68,6 +68,10 @@ Hashes.
   aktuelle Version auf `is_current = 0` gesetzt und eine neue Version mit
   `is_current = 1` sowie `version = version + 1` angelegt.
 - Alte Versionen bleiben erhalten und sind über die Versions-API abrufbar.
+- Die semantische Suche liefert **nur Treffer der aktuellen Version**
+  (`is_current = 1`). Vektoren alter Versionen bleiben in Milvus, werden aber
+  beim Suchen nachträglich über MySQL herausgefiltert (Kandidatenfenster
+  `min(250, 5·limit)`, bei Bedarf einmalig auf 1000 erweitert).
 
 ## 3. MySQL-Struktur
 

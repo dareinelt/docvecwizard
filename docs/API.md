@@ -129,7 +129,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
-| POST | `/api/search` | Semantische Suche (`{query, limit}`) |
+| POST | `/api/search` | Semantische Suche (`{query, limit}`, limit 1–50). Liefert nur Treffer aktueller Dokumentversionen; 409, wenn der Embedding-Dienst ein anderes als das aktive Modell geladen hat |
 
 ## Beispiele
 
