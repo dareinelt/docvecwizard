@@ -65,14 +65,11 @@ function finalizeJob(int $id): void
         }
     }
 
-    if ((int) $job['documents_failed'] > 0 && (int) $job['documents_processed'] === 0) {
-        $jobService->setStatus($id, JobService::STATUS_FAILED);
-    } else {
-        $jobService->setStatus($id, JobService::STATUS_COMPLETED);
-    }
+    $status = JobService::finalStatus((int) $job['documents_failed'], (int) $job['documents_processed']);
+    $jobService->setStatus($id, $status);
     Logger::channel('worker')->info('job finalized', [
         'job_id' => $job['job_id'],
-        'status' => $job['status'],
+        'status' => $status,
     ]);
 }
 
@@ -180,12 +177,23 @@ while (!$stopping) {
         $didWork = true;
     }
 
-    // 4. Check for cancellation requests.
-    Db::execute(
-        "UPDATE documents d JOIN jobs j ON j.id = d.job_id
-         SET d.processing_status = 'PENDING'
+    // 4. Check for cancellation requests: park open documents of cancelled
+    //    jobs as PENDING (resume() or a later discovery picks them up) and keep
+    //    the job counters truthful.
+    $cancelledOpen = Db::fetchAll(
+        "SELECT DISTINCT j.id FROM jobs j JOIN documents d ON d.job_id = j.id
          WHERE j.status = 'CANCELLED' AND d.processing_status IN ('DISCOVERED','PROCESSING')"
     );
+    if ($cancelledOpen !== []) {
+        Db::execute(
+            "UPDATE documents d JOIN jobs j ON j.id = d.job_id
+             SET d.processing_status = 'PENDING'
+             WHERE j.status = 'CANCELLED' AND d.processing_status IN ('DISCOVERED','PROCESSING')"
+        );
+        foreach ($cancelledOpen as $row) {
+            $jobService->refreshCounters((int) $row['id']);
+        }
+    }
 
     if (!$didWork) {
         $idleLogs++;

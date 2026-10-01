@@ -58,7 +58,7 @@
   const STATUS_LABELS = {
     COMPLETED: 'Abgeschlossen', RUNNING: 'Läuft', CREATED: 'Erstellt', PENDING: 'Wartend',
     PROCESSING: 'In Verarbeitung', DISCOVERED: 'Gefunden', FAILED: 'Fehlgeschlagen',
-    CANCELLED: 'Abgebrochen', IMPORTED: 'Importiert', PAUSED: 'Pausiert',
+    CANCELLED: 'Abgebrochen', IMPORTED: 'Importiert',
   };
 
   function statusBadge(status) {
@@ -67,7 +67,6 @@
       COMPLETED: 'badge-green', RUNNING: 'badge-blue', CREATED: 'badge-gray',
       PENDING: 'badge-gray', PROCESSING: 'badge-blue', DISCOVERED: 'badge-gray',
       FAILED: 'badge-red', CANCELLED: 'badge-amber', IMPORTED: 'badge-green',
-      PAUSED: 'badge-amber',
     };
     const label = STATUS_LABELS[s] || status || '–';
     return '<span class="badge ' + (map[s] || 'badge-gray') + '" title="' + esc(status || '') + '">' + esc(label) + '</span>';
@@ -698,7 +697,9 @@
   }
 
   function showJob(j) {
-    const cancellable = ['RUNNING', 'CREATED', 'PENDING', 'PAUSED'].includes(String(j.status).toUpperCase());
+    const status = String(j.status).toUpperCase();
+    const cancellable = ['RUNNING', 'CREATED'].includes(status);
+    const resumable = status === 'CANCELLED';
     openModal('Auftrag: ' + (j.name || ''), `
       <div class="grid cards mb">
         <div class="card stat"><div class="value">${esc(j.name)}</div><div class="label">Name</div></div>
@@ -706,13 +707,24 @@
         <div class="card stat"><div class="value">${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</div><div class="label">Dokumente</div></div>
       </div>
       ${j.error_message ? `<p class="form-error">${esc(j.error_message)}</p>` : ''}
+      ${resumable && Number(j.documents_pending) > 0 ? `<p class="muted">${fmtNumber(j.documents_pending)} Dokument(e) warten auf Fortsetzung.</p>` : ''}
       <details><summary>Rohdaten</summary><pre class="code">${esc(JSON.stringify(j, null, 2))}</pre></details>
-      <div class="flex mt">${cancellable ? '<button class="btn btn-danger" type="button" id="job-cancel">Auftrag abbrechen</button>' : ''}</div>`);
+      <div class="flex mt">
+        ${cancellable ? '<button class="btn btn-danger" type="button" id="job-cancel">Auftrag abbrechen</button>' : ''}
+        ${resumable ? '<button class="btn btn-primary" type="button" id="job-resume">Auftrag fortsetzen</button>' : ''}
+      </div>`);
     const cancel = $('#job-cancel');
     if (cancel) cancel.addEventListener('click', async () => {
       if (!confirm('Auftrag „' + j.name + '“ wirklich abbrechen?')) return;
       await busy(cancel, async () => {
         try { await api('/api/jobs/' + enc(j.job_id) + '/cancel', { method: 'POST' }); notify('Auftrag abgebrochen.', 'success'); closeModal(); navigate('jobs', true); }
+        catch (e) { notify(e.message, 'error'); }
+      });
+    });
+    const resume = $('#job-resume');
+    if (resume) resume.addEventListener('click', async () => {
+      await busy(resume, async () => {
+        try { await api('/api/jobs/' + enc(j.job_id) + '/resume', { method: 'POST' }); notify('Auftrag wird fortgesetzt.', 'success'); closeModal(); navigate('jobs', true); }
         catch (e) { notify(e.message, 'error'); }
       });
     });

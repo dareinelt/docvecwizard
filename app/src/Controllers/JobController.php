@@ -58,4 +58,18 @@ final class JobController extends Controller
 
         return Response::json(['job' => $service->getByUuid($jobId)]);
     }
+
+    /** @param array<string,string> $params */
+    public function resume(Request $request, array $params): Response
+    {
+        $jobId = $this->uuidParam($params, 'id', 'Job not found');
+        $service = new JobService();
+        $job = $service->getByUuid($jobId);
+        if ($job === null) {
+            throw HttpException::notFound('Job not found');
+        }
+        $service->resume((int) $job['id']);
+
+        return Response::json(['job' => $service->getByUuid($jobId)]);
+    }
 }

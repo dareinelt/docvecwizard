@@ -56,6 +56,7 @@ final class Routes
         $router->post('/api/jobs', [$jobs, 'create']);
         $router->get('/api/jobs/{id}', [$jobs, 'show']);
         $router->post('/api/jobs/{id}/cancel', [$jobs, 'cancel']);
+        $router->post('/api/jobs/{id}/resume', [$jobs, 'resume']);
 
         $router->get('/api/documents', [$documents, 'index']);
         $router->get('/api/documents/{id}', [$documents, 'show']);

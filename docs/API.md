@@ -56,7 +56,8 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/jobs` | Jobs auflisten (`?limit=`) |
 | POST | `/api/jobs` | Job anlegen |
 | GET | `/api/jobs/{id}` | Job-Details |
-| POST | `/api/jobs/{id}/cancel` | Job abbrechen |
+| POST | `/api/jobs/{id}/cancel` | Job abbrechen (offene Dokumente werden als `PENDING` geparkt) |
+| POST | `/api/jobs/{id}/resume` | Abgebrochenen Job fortsetzen (400, wenn nicht `CANCELLED`) |
 
 ### Dokumente
 

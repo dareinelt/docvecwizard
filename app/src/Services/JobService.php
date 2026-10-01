@@ -17,7 +17,6 @@ final class JobService
     public const STATUS_COMPLETED = JobStatus::Completed->value;
     public const STATUS_FAILED = JobStatus::Failed->value;
     public const STATUS_CANCELLED = JobStatus::Cancelled->value;
-    public const STATUS_PAUSED = JobStatus::Paused->value;
 
     /**
      * @param array{name:string,source_directory:string,recursive:bool,embedding_model:string} $input
@@ -170,7 +169,59 @@ final class JobService
             return;
         }
         $this->setStatus($id, self::STATUS_CANCELLED);
+        // Open documents of a cancelled job are parked as PENDING by the worker
+        // sweep (worker.php) and picked up again by resume() or a later job.
+        Db::execute(
+            'UPDATE documents SET processing_status = "PENDING" WHERE job_id = ? AND processing_status = "DISCOVERED"',
+            [$id]
+        );
+        $this->refreshCounters($id);
         Audit::record('job.cancel', 'job', (string) $job['job_id']);
+    }
+
+    /**
+     * Resume a cancelled job: it goes back to RUNNING and its parked (PENDING)
+     * documents are processed. Documents that are still PROCESSING (worker is
+     * mid-document) are left alone; the worker re-processes them idempotently.
+     *
+     * @throws \InvalidArgumentException with a user-facing (German) message
+     */
+    public function resume(int $id): void
+    {
+        $job = $this->getById($id);
+        if ($job === null) {
+            throw new \InvalidArgumentException('Job not found');
+        }
+        $status = JobStatus::tryFrom((string) $job['status']);
+        if ($status === null || !$status->isResumable()) {
+            throw new \InvalidArgumentException(sprintf('Nur abgebrochene Aufträge können fortgesetzt werden (Status: %s).', (string) $job['status']));
+        }
+        // A job cancelled before its discovery pass (never started) goes back
+        // to CREATED so the worker discovers its files; otherwise straight to
+        // RUNNING so the parked documents are processed.
+        $target = $job['started_at'] === null ? self::STATUS_CREATED : self::STATUS_RUNNING;
+        Db::transaction(function () use ($id, $target): void {
+            Db::execute(
+                'UPDATE documents SET processing_status = "DISCOVERED" WHERE job_id = ? AND processing_status = "PENDING"',
+                [$id]
+            );
+            Db::execute(
+                'UPDATE jobs SET status = ?, finished_at = NULL, error_message = NULL WHERE id = ?',
+                [$target, $id]
+            );
+        });
+        $this->refreshCounters($id);
+        Audit::record('job.resume', 'job', (string) $job['job_id']);
+    }
+
+    /**
+     * Final status of a job whose documents are all settled: FAILED only when
+     * nothing succeeded at all, otherwise COMPLETED (partial failures are
+     * visible through documents_failed / processing_errors).
+     */
+    public static function finalStatus(int $failed, int $processed): string
+    {
+        return $failed > 0 && $processed === 0 ? self::STATUS_FAILED : self::STATUS_COMPLETED;
     }
 
     /** Recompute aggregate counters for a job. */

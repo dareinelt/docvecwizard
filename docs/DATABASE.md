@@ -64,7 +64,7 @@ Key/Value-Konfiguration (Laufzeit-Einstellungen, Chunking, Modell).
 | recursive | TINYINT(1) | rekursiv? |
 | embedding_model | VARCHAR(191) | Modellname |
 | embedding_dimension | INT | Dimension |
-| status | VARCHAR(32) | CREATED/RUNNING/COMPLETED/FAILED/CANCELLED/PAUSED |
+| status | VARCHAR(32) | CREATED/RUNNING/COMPLETED/FAILED/CANCELLED |
 | created_at / started_at / finished_at | DATETIME | |
 | documents_total / pending / processing / processed / failed | INT | Zähler |
 | chunks_total / vectors_total | INT | |

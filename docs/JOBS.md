@@ -13,17 +13,19 @@ Aus `JobService`:
 | --- | --- |
 | `CREATED` | angelegt, wartet auf Verarbeitung |
 | `RUNNING` | wird verarbeitet |
-| `COMPLETED` | erfolgreich abgeschlossen |
-| `FAILED` | fehlgeschlagen |
-| `CANCELLED` | abgebrochen |
-| `PAUSED` | pausiert |
+| `COMPLETED` | abgeschlossen (auch bei einzelnen fehlgeschlagenen Dokumenten, sofern mindestens eines erfolgreich war) |
+| `FAILED` | fehlgeschlagen (Discovery-Fehler oder kein einziges Dokument erfolgreich) |
+| `CANCELLED` | abgebrochen; kann fortgesetzt werden |
+
+Einen Status `PAUSED` gibt es nicht (wurde nie gesetzt und ist entfernt).
 
 ## Lebenszyklus
 
 ```text
 CREATED ──► RUNNING ──► COMPLETED
-              │  └──► FAILED
-              └──► CANCELLED
+   ▲          │  └──► FAILED
+   │          └──► CANCELLED ──► RUNNING (resume)
+   └──────────────────┘ (resume, falls noch nie gestartet)
 ```
 
 1. **Anlegen:** `POST /api/jobs` prüft das Embedding-Modell und legt den Job
@@ -31,10 +33,13 @@ CREATED ──► RUNNING ──► COMPLETED
 2. **Claim:** Der Worker übernimmt `CREATED`-Jobs atomar (`CREATED → RUNNING`).
 3. **Scan:** Der Worker scannt das Quellverzeichnis rekursiv (oder nicht),
    dedupliziert per SHA-256 und legt `documents` mit `DISCOVERED` an.
+   Unveränderte Dateien, deren aktuelle Version `FAILED` oder `PENDING` ist,
+   werden dem neuen Job zugeordnet und erneut verarbeitet.
 4. **Verarbeitung:** Dokumente werden nacheinander konvertiert, gechunkt,
    eingebettet und nach Milvus geschrieben.
 5. **Abschluss:** `finalizeJob()` berechnet die aggregierten Zähler und setzt
-   den Status auf `COMPLETED` (bzw. `FAILED` bei Fehlern).
+   den Status: `FAILED` nur, wenn kein Dokument erfolgreich war
+   (`JobService::finalStatus()`), sonst `COMPLETED`.
 
 ## Worker
 
@@ -69,11 +74,19 @@ zurück.
 | `WORKER_LOCK_TIMEOUT` | 1800 | Lock-Timeout (s) |
 | `WORKER_POLL_INTERVAL` | 2 | Poll-Intervall (s) |
 
-## Abbruch
+## Abbruch und Fortsetzung
 
 `POST /api/jobs/{id}/cancel` setzt einen nicht-terminalen Job auf `CANCELLED`.
-Terminale Jobs (`COMPLETED`, `FAILED`, `CANCELLED`) können nicht abgebrochen
-werden.
+Noch nicht verarbeitete Dokumente des Jobs werden auf `PENDING` geparkt, die
+Zähler werden aktualisiert. Terminale Jobs (`COMPLETED`, `FAILED`,
+`CANCELLED`) können nicht abgebrochen werden.
+
+`POST /api/jobs/{id}/resume` setzt einen `CANCELLED`-Job fort: geparkte
+`PENDING`-Dokumente werden wieder `DISCOVERED`, der Job geht nach `RUNNING`
+(bzw. nach `CREATED`, falls er vor seiner Discovery abgebrochen wurde) und
+`finished_at` wird gelöscht. `COMPLETED`/`FAILED` sind endgültig; einzelne
+fehlgeschlagene Dokumente lassen sich über `POST /api/documents/{id}/retry`
+oder einen neuen Job über dasselbe Verzeichnis erneut verarbeiten.
 
 ## Statistik
 
