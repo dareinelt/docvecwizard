@@ -2,9 +2,10 @@
 
 ## Übersicht
 
-Das System kann alle indizierten Daten (Dokumente, Chunks, Metadaten) als
-Archiv exportieren und wieder importieren. Dies dient Backup, Migration und
-Austausch.
+Das System kann **alle** indizierten Daten – Originaldokumente, Chunks,
+Metadaten **und** Vektoren – als Archiv exportieren und ID-erhaltend wieder
+importieren. Dies dient Backup, Migration und Austausch (auch in ein zweites
+System).
 
 ## Export
 
@@ -12,24 +13,29 @@ Austausch.
 
 1. `POST /api/exports` legt einen Export mit `status=PENDING` an.
 2. Der Export wird asynchron erstellt.
-3. Das Ergebnis ist ein Archiv (`tar.zst` Standard) mit Manifest und Prüfsumme.
+3. Das Ergebnis ist ein gzip-komprimiertes Archiv (`.tar.gz`) mit Manifest und
+   SHA-256-Prüfsummen.
 4. `GET /api/exports/{id}/download` lädt die Datei herunter.
 
 ### Inhalt
 
 Das Exportarchiv enthält:
 
-- **Manifest** (JSON): Liste der Dokumente, Chunks, Metadaten
+- **Manifest** (JSON): Zähler, Einbettungsmodelle, Collections, Checksummen
+- **Originale** (`originals/`): byte-genaue Originaldateien als Base64
 - **Chunk-Texte** (aus `document_chunks.text`)
-- **Prüfsumme** (SHA-256)
+- **Vektoren**: vollständige Float-Vektoren je Chunk
+- **Beziehungen**: `document_version_id` ↔ `chunk_id` ↔ `vector_id`
+- **Metadaten**: Seiten, Sprache, Autor, …
+- **Prüfsummen** (SHA-256) je Datei und für das Gesamtarchiv
 
 ### Tabelle `exports`
 
 | Spalte | Beschreibung |
 | --- | --- |
 | export_id | UUID |
-| filename | Dateiname |
-| format | `tar.zst` |
+| filename | Dateiname (`.tar.gz`) |
+| format | `tar.gz` |
 | status | PENDING/COMPLETED/FAILED |
 | manifest | JSON-Manifest |
 | checksum | SHA-256 |
@@ -45,21 +51,40 @@ Das Exportarchiv enthält:
 
 ## Import
 
-`POST /api/import` nimmt ein zuvor exportiertes Archiv entgegen und stellt
-Dokumente und Chunks wieder her.
+`POST /api/import` nimmt ein zuvor exportiertes Archiv (multipart `archive`
+plus `strategy`) oder ein Legacy-Manifest (JSON) entgegen und stellt Dokumente,
+Originale, Chunks und Vektoren wieder her.
 
-Der Import (`ExportService::import()`) läuft in einer Transaktion und
-rekonstruiert Dokumente aus dem Manifest. Vektoren werden – soweit im Export
-enthalten – nach Milvus zurückgeschrieben; andernfalls müssen Dokumente neu
-indiziert werden.
+Der Import verifiziert zuerst die Integrität (Manifest + SHA-256), bevor er
+schreibt. Vektoren werden ID-erhaltend nach Milvus zurückgeschrieben.
+
+### Konfliktstrategien
+
+| Strategie | Verhalten |
+| --- | --- |
+| `skip` (Standard) | Vorhandene IDs überspringen |
+| `overwrite` | Vorhandene IDs ersetzen |
+
+### Ergebnis
+
+Das Ergebnis meldet `imported`, `reused`, `skipped`, `overwritten` und
+`conflicts`.
+
+## Integritätsprüfung
+
+`GET /api/integrity` prüft unabhängig vom Import den Gesamtzustand:
+Base64-Roundtrips, Hashfehler, verwaiste Vektoren, fehlende Blobs/Chunks sowie
+Collections- und Dimensionskonsistenz (siehe
+[SOURCE_REFERENCE.md](SOURCE_REFERENCE.md)).
 
 ## Oberfläche
 
 In der Ansicht **Export / Import**:
 
-- **Export erstellen** – Format wählen, Export anlegen
+- **Export erstellen** – Export anlegen
 - **Exportstatus** – Liste mit Status und Download-Link
-- **Import** – Archiv auswählen und hochladen
+- **Import** – `.tar.gz`-Archiv auswählen, Konfliktstrategie wählen und
+  hochladen (oder Legacy-Manifest-JSON einfügen)
 
 ## Dateiablage
 
@@ -74,5 +99,7 @@ data/exports/
 ## Hinweise
 
 - Exporte bleiben bis zur manuellen Löschung erhalten.
-- Die Quelldokumente (`data/input/`) sind **nicht** Teil des Exports – nur die
-  indizierten Inhalte (Text/Chunks/Metadaten).
+- Die **Originaldokumente** sind Teil des Exports (Base64 im Archiv) und können
+  beim Import vollständig wiederhergestellt werden.
+- Der Import erfordert passende Embedding-Dimensionen/Collections
+  (Dimensionsprüfung vorhanden).

@@ -46,8 +46,10 @@ final class ProcessingService
     }
 
     /**
-     * Scan the job's source directory and register discovered files (dedupe by
-     * SHA-256). Returns the number of newly discovered documents.
+     * Scan the job's source directory and register discovered files. Versions
+     * are grouped by stable source path (a grouping hint only — identity is the
+     * generated `document_id`/`document_version_id`), and identical content is
+     * deduplicated by SHA-256. Returns the number of newly created versions.
      *
      * @param array<string,mixed> $job
      */
@@ -62,21 +64,35 @@ final class ProcessingService
         $recursive = (bool) $job['recursive'];
         $files = $this->scanFiles($absolute, $recursive);
         $newCount = 0;
-        $seen = [];
         foreach ($files as $file) {
             $relative = ltrim(substr($file, strlen($absolute)), '/');
             $hash = hash_file('sha256', $file);
             if ($hash === false) {
                 continue;
             }
-            if (isset($seen[$hash])) {
+
+            // 1. Same source path, same content -> unchanged.
+            $current = Db::fetchOne(
+                'SELECT id, document_id, file_hash FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
+                [$file]
+            );
+            if ($current !== null && $current['file_hash'] === $hash) {
                 continue;
             }
-            $seen[$hash] = true;
-            $existing = Db::fetchOne('SELECT id, processing_status FROM documents WHERE file_hash = ? LIMIT 1', [$hash]);
-            if ($existing !== null) {
+
+            // 2. Same source path, different content -> new version.
+            if ($current !== null) {
+                $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
+                $newCount++;
                 continue;
             }
+
+            // 3. No document at this path yet -> global content dedupe.
+            $dup = Db::fetchOne('SELECT id FROM documents WHERE file_hash = ? LIMIT 1', [$hash]);
+            if ($dup !== null) {
+                continue;
+            }
+
             $this->insertDiscovered($job, $file, $relative, $hash);
             $newCount++;
         }
@@ -115,27 +131,88 @@ final class ProcessingService
     /** @param array<string,mixed> $job */
     private function insertDiscovered(array $job, string $absolute, string $relative, string $hash): void
     {
+        $documentId = Uuid::v4();
+        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, $documentId, 1);
+    }
+
+    /** @param array<string,mixed> $job */
+    private function insertVersion(array $job, string $absolute, string $relative, string $hash, string $documentId): void
+    {
+        $current = Db::fetchOne('SELECT version FROM documents WHERE document_id = ? ORDER BY version DESC LIMIT 1', [$documentId]);
+        $version = ((int) ($current['version'] ?? 0)) + 1;
+
+        // Retire the current version so it never points at the new vectors.
+        Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ? AND is_current = 1', [$documentId]);
+
+        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, Uuid::v4(), $version);
+    }
+
+    /**
+     * Insert one document version plus its original-file blob atomically.
+     *
+     * @param array<string,mixed> $job
+     */
+    private function insertDocumentVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, string $documentVersionId, int $version): void
+    {
         $stat = stat($absolute);
+        $isStat = is_array($stat);
+        $size = $isStat ? (int) ($stat['size'] ?? 0) : 0;
+        $ctime = $isStat && isset($stat['ctime']) ? gmdate('Y-m-d H:i:s', $stat['ctime']) : null;
+        $mtime = $isStat && isset($stat['mtime']) ? gmdate('Y-m-d H:i:s', $stat['mtime']) : null;
+        $ext = strtolower(pathinfo($absolute, PATHINFO_EXTENSION));
+
+        Db::transaction(function () use ($job, $absolute, $relative, $hash, $documentId, $documentVersionId, $version, $size, $ctime, $mtime, $ext): void {
+            Db::execute(
+                'INSERT INTO documents (document_id, document_version_id, version, is_current, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, created_at, modified_at, processing_status, embedding_model, embedding_dimension)
+                 VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "DISCOVERED", ?, ?)',
+                [
+                    $documentId,
+                    $documentVersionId,
+                    $version,
+                    $job['id'],
+                    $absolute,
+                    $relative,
+                    basename($absolute),
+                    $ext,
+                    $this->guessMime($ext),
+                    $size,
+                    $hash,
+                    $ctime,
+                    $mtime,
+                    $job['embedding_model'],
+                    (int) $job['embedding_dimension'],
+                ]
+            );
+            $id = Db::insertId();
+            $blobId = $this->storeBlob($documentId, $documentVersionId, $absolute, $hash, $size);
+            Db::execute('UPDATE documents SET blob_id = ? WHERE id = ?', [$blobId, $id]);
+        });
+    }
+
+    /** Store the original file byte-for-byte as Base64; returns the blob id. */
+    private function storeBlob(string $documentId, string $documentVersionId, string $absolute, string $hash, int $size): int
+    {
+        $bytes = file_get_contents($absolute);
+        if ($bytes === false) {
+            throw new \RuntimeException('Cannot read source file for blob storage: ' . $absolute);
+        }
+        $base64 = base64_encode($bytes);
         $ext = strtolower(pathinfo($absolute, PATHINFO_EXTENSION));
         Db::execute(
-            'INSERT INTO documents (document_id, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, created_at, modified_at, processing_status, embedding_model, embedding_dimension)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "DISCOVERED", ?, ?)',
+            'INSERT INTO document_blobs (document_id, document_version_id, encoding, mime_type, original_filename, file_size, sha256, base64_data)
+             VALUES (?, ?, "base64", ?, ?, ?, ?, ?)',
             [
-                Uuid::v4(),
-                $job['id'],
-                $absolute,
-                $relative,
-                basename($absolute),
-                $ext,
+                $documentId,
+                $documentVersionId,
                 $this->guessMime($ext),
-                $stat['size'] ?? 0,
+                basename($absolute),
+                $size > 0 ? $size : strlen($bytes),
                 $hash,
-                isset($stat['ctime']) ? gmdate('Y-m-d H:i:s', $stat['ctime']) : null,
-                isset($stat['mtime']) ? gmdate('Y-m-d H:i:s', $stat['mtime']) : null,
-                $job['embedding_model'],
-                (int) $job['embedding_dimension'],
+                $base64,
             ]
         );
+
+        return Db::insertId();
     }
 
     private function guessMime(string $ext): string
@@ -184,6 +261,8 @@ final class ProcessingService
             $dimension = (int) $doc['embedding_dimension'];
             $this->ensureCollection($collection, $dimension, 'cosine');
 
+            $jobUuid = Db::fetchValue('SELECT job_id FROM jobs WHERE id = ?', [$doc['job_id']], '');
+
             $batchSize = (int) $this->chunkerConfig()['batch_size'];
             $chunkRows = [];
             $storedChunks = 0;
@@ -196,12 +275,24 @@ final class ProcessingService
                         throw new \RuntimeException('Embedding service did not return a vector for index ' . $i);
                     }
                     $chunkId = Uuid::v4();
+                    $vectorId = Uuid::v4();
                     $chunkRows[] = [
+                        'id' => $vectorId,
                         'document_id' => (string) $doc['document_id'],
+                        'document_version_id' => (string) $doc['document_version_id'],
+                        'chunk_id' => $chunkId,
+                        'job_id' => (string) $jobUuid,
+                        'source_path' => (string) $doc['source_path'],
+                        'filename' => (string) $doc['filename'],
+                        'document_hash' => (string) $doc['file_hash'],
+                        'embedding_model' => (string) $doc['embedding_model'],
+                        'embedding_dimension' => $dimension,
                         'chunk_index' => (int) $chunk['chunk_index'],
+                        'page_start' => (int) $chunk['page_start'],
+                        'page_end' => (int) $chunk['page_end'],
                         'vector' => $vector,
                     ];
-                    $this->persistChunk($id, $chunkId, $chunk);
+                    $this->persistChunk($id, $chunkId, $vectorId, $chunk);
                     $storedChunks++;
                 }
                 if ($chunkRows !== []) {
@@ -291,14 +382,15 @@ final class ProcessingService
     }
 
     /** @param array{text:string,token_count:int,chunk_index:int,page_start:int,page_end:int} $chunk */
-    private function persistChunk(int $documentId, string $chunkId, array $chunk): void
+    private function persistChunk(int $documentId, string $chunkId, string $vectorId, array $chunk): void
     {
         Db::execute(
-            'INSERT INTO document_chunks (document_id, chunk_id, chunk_index, page_start, page_end, text_length, token_count, text)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO document_chunks (document_id, chunk_id, vector_id, chunk_index, page_start, page_end, text_length, token_count, text)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 $documentId,
                 $chunkId,
+                $vectorId,
                 $chunk['chunk_index'],
                 $chunk['page_start'],
                 $chunk['page_end'],

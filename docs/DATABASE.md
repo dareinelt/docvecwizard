@@ -5,11 +5,12 @@
 Das System verwendet **MariaDB 11.4** für alle relationalen Daten. Die
 Vektoren selbst liegen in **Milvus** (siehe [MILVUS.md](MILVUS.md)).
 
-Das Schema liegt an zwei Stellen vor (identischer Inhalt):
+Das Schema liegt an folgenden Stellen vor (identischer Inhalt):
 
-- `app/migrations/0001_initial.sql` – von `migrate` ausgeführt
-- `database/schema.sql` – Dokumentations-/Referenzkopie
-- `database/migrations/0001_initial.sql` – Spiegel der Migration
+- `app/migrations/0001_initial.sql` und `0002_document_blobs_versioning.sql` –
+  von `migrate` ausgeführt
+- `database/schema.sql` – Dokumentations-/Referenzkopie (0001 + 0002)
+- `database/migrations/` – Spiegel der Migrationen
 
 ## Migration
 
@@ -75,7 +76,12 @@ Key/Value-Konfiguration (Laufzeit-Einstellungen, Chunking, Modell).
 | Spalte | Typ | Beschreibung |
 | --- | --- | --- |
 | id | BIGINT UNSIGNED PK | |
-| document_id | VARCHAR(36) UNIQUE | UUID |
+| document_id | VARCHAR(36) | logische Dokument-ID (UUID, mehrfach je Version) |
+| document_version_id | VARCHAR(36) UNIQUE | unveränderliche Versions-ID (UUID) |
+| version | INT | Versionsnummer |
+| is_current | TINYINT(1) | aktuelle Version? |
+| blob_id | BIGINT UNSIGNED NULL | Verweis auf `document_blobs` |
+| metadata | JSON NULL | Metadaten (Seiten, Sprache, Autor, …) |
 | job_id | BIGINT UNSIGNED NULL FK | zugehöriger Job |
 | source_path / relative_path | VARCHAR(1024) | Pfade |
 | filename | VARCHAR(512) | Dateiname |
@@ -99,12 +105,30 @@ Key/Value-Konfiguration (Laufzeit-Einstellungen, Chunking, Modell).
 | Spalte | Typ | Beschreibung |
 | --- | --- | --- |
 | id | BIGINT UNSIGNED PK | |
-| document_id | BIGINT UNSIGNED FK | Dokument |
+| document_id | BIGINT UNSIGNED FK | Dokument (Version) |
 | chunk_id | VARCHAR(36) UNIQUE | UUID |
+| vector_id | VARCHAR(36) NULL | stabiler Verweis auf Milvus-Primärschlüssel |
 | chunk_index | INT | Position |
 | page_start / page_end | INT | Seiten |
 | text_length / token_count | INT | |
-| text | MEDIUMTEXT | Chunk-Text (lokal für Export) |
+| text | MEDIUMTEXT | Chunk-Text (lokal für Export/Retrieval) |
+
+### `document_blobs`
+
+Byte-genaue Originaldateien (Base64) – eine Zeile je Dokumentversion.
+
+| Spalte | Typ | Beschreibung |
+| --- | --- | --- |
+| blob_id | BIGINT UNSIGNED PK | |
+| document_id | VARCHAR(36) | logische Dokument-ID |
+| document_version_id | VARCHAR(36) UNIQUE | Versions-ID |
+| encoding | VARCHAR(32) | `base64` |
+| mime_type | VARCHAR(128) | MIME-Typ |
+| original_filename | VARCHAR(512) | ursprünglicher Dateiname |
+| file_size | BIGINT | Byte-Größe |
+| sha256 | CHAR(64) | SHA-256 der Originalbytes |
+| base64_data | LONGTEXT | Base64-kodierter Byte-Strom |
+| created_at | DATETIME | |
 
 ### `processing_errors`
 
@@ -163,8 +187,8 @@ Persistente Metrik-Snapshots.
 | --- | --- | --- |
 | id | BIGINT UNSIGNED PK | |
 | export_id | VARCHAR(36) UNIQUE | UUID |
-| filename | VARCHAR(255) | Dateiname |
-| format | VARCHAR(32) | tar.zst |
+| filename | VARCHAR(255) | Dateiname (`.tar.gz`) |
+| format | VARCHAR(32) | tar.gz |
 | status | VARCHAR(32) | PENDING/COMPLETED/FAILED |
 | manifest | JSON NULL | Manifest |
 | checksum | CHAR(64) | SHA-256 |
@@ -175,6 +199,9 @@ Persistente Metrik-Snapshots.
 
 ```text
 jobs 1 ── N documents 1 ── N document_chunks
+                 │                  │
+                 │ 1 ── 1 document_blobs
+                 │                  └── vector_id ── Milvus.id
                  │
                  └── N processing_errors
 
@@ -189,3 +216,6 @@ tls_certificates, exports, settings, system_metrics, audit_log (eigenständig)
   Verarbeitungszustand; `jobs.status` den Job-Zustand.
 - Chunk-Texte werden in `document_chunks.text` lokal vorgehalten (für
   Export/Retrieval); die Vektoren liegen nur in Milvus.
+- `document_id` ist die logische Identität, `document_version_id` die
+  unveränderliche Identität einer Version; `vector_id` verknüpft einen Chunk
+  bidirektional mit dem Milvus-Primärschlüssel.

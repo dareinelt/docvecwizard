@@ -221,3 +221,17 @@ pre.code {
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
   padding: 12px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all;
 }
+
+/* Document detail tabs */
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tab {
+  padding: 8px 12px; cursor: pointer; color: var(--text-dim); font-size: 13px;
+  border: none; background: transparent; border-bottom: 2px solid transparent;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--text); border-bottom-color: var(--primary); font-weight: 600; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.kv { display: grid; grid-template-columns: 180px 1fr; gap: 4px 12px; font-size: 13px; }
+.kv dt { color: var(--text-dim); }
+.kv dd { margin: 0; word-break: break-all; }

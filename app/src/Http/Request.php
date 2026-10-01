@@ -76,6 +76,11 @@ final class Request
 
             return is_array($result) ? $result : [];
         }
+        if (str_contains($contentType, 'multipart/form-data')) {
+            // PHP has already parsed multipart fields into $_POST by the time
+            // the request reaches this constructor.
+            return is_array($_POST) ? $_POST : [];
+        }
 
         return [];
     }

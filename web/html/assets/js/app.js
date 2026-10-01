@@ -225,24 +225,111 @@
 
   async function showDocument(id) {
     openModal('Dokument', '<div class="spinner">Lade…</div>');
+    let d;
+    let meta = {};
+    let vectors = [];
     try {
-      const r = await api('/api/documents/' + id);
-      const d = r.document || {};
-      const chunks = d.chunks || [];
-      const html = `
+      const [docRes, metaRes, vecRes] = await Promise.all([
+        api('/api/documents/' + id),
+        api('/api/documents/' + id + '/metadata').catch(() => ({ metadata: {} })),
+        api('/api/documents/' + id + '/vectors').catch(() => ({ vectors: [] })),
+      ]);
+      d = docRes.document || {};
+      meta = metaRes.metadata || {};
+      vectors = vecRes.vectors || [];
+    } catch (e) {
+      $('#modal-body').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>';
+      return;
+    }
+
+    const s = d.source || {};
+    const versions = d.versions || [];
+    const chunks = d.chunks || [];
+    const metaEntries = Object.entries(meta);
+    const html = `
+      <div class="tabs" id="doc-tabs">
+        <button class="tab active" data-tab="overview">Übersicht</button>
+        <button class="tab" data-tab="versions">Versionen (${versions.length})</button>
+        <button class="tab" data-tab="chunks">Chunks (${chunks.length})</button>
+        <button class="tab" data-tab="vectors">Vektoren (${vectors.length})</button>
+        <button class="tab" data-tab="source">Quelle</button>
+        <button class="tab" data-tab="metadata">Metadaten (${metaEntries.length})</button>
+      </div>
+
+      <div class="tab-panel active" data-panel="overview">
         <div class="grid cards mb">
-          <div class="card stat"><div class="value">${esc(d.filename)}</div><div class="label">Dateiname</div></div>
-          <div class="card stat"><div class="value">${fmtNumber(d.chunk_count)}</div><div class="label">Chunks</div></div>
+          <div class="card stat"><div class="value">${esc(s.original_filename || d.filename)}</div><div class="label">Originaldatei</div></div>
+          <div class="card stat"><div class="value">${fmtBytes(s.file_size)}</div><div class="label">Originalgröße</div></div>
           <div class="card stat"><div class="value">${esc(d.embedding_model || '–')}</div><div class="label">Modell</div></div>
+          <div class="card stat"><div class="value">${statusBadge(d.processing_status)}</div><div class="label">Status</div></div>
         </div>
-        <pre class="code mb">${esc(d.relative_path)}</pre>
-        <h3>Chunks</h3>
+        <div class="flex mb">
+          ${s.source_available ? `<a class="btn btn-primary" href="/api/documents/${esc(d.document_id)}/download">Original herunterladen</a>` : '<span class="muted">Original nicht verfügbar</span>'}
+        </div>
+        <dl class="kv">
+          <dt>Dokument-ID</dt><dd class="mono">${esc(d.document_id)}</dd>
+          <dt>Versions-ID</dt><dd class="mono">${esc(d.document_version_id)}</dd>
+          <dt>Version</dt><dd>${fmtNumber(d.version)}</dd>
+          <dt>SHA-256</dt><dd class="mono">${esc(s.sha256 || d.file_hash)}</dd>
+          <dt>Pfad</dt><dd class="mono">${esc(d.relative_path)}</dd>
+          <dt>Seiten</dt><dd>${fmtNumber(d.page_count)}</dd>
+          <dt>Chunks</dt><dd>${fmtNumber(d.chunk_count)}</dd>
+        </dl>
+      </div>
+
+      <div class="tab-panel" data-panel="versions">
+        ${versions.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Version</th><th>Versions-ID</th><th>Status</th><th>Chunks</th><th>Größe</th><th>Aktuell</th></tr></thead>
+          <tbody>${versions.map(v => `<tr>
+            <td>${fmtNumber(v.version)}</td>
+            <td class="mono">${esc(v.document_version_id)}</td>
+            <td>${statusBadge(v.processing_status)}</td>
+            <td>${fmtNumber(v.chunk_count)}</td>
+            <td>${fmtBytes(v.file_size)}</td>
+            <td>${Number(v.is_current) ? '✓' : ''}</td>
+          </tr>`).join('')}</tbody></table></div>` : '<p class="empty">Keine Versionen.</p>'}
+      </div>
+
+      <div class="tab-panel" data-panel="chunks">
         ${chunks.map(c => `<div class="card mb">
-          <div class="muted">Chunk ${fmtNumber(c.chunk_index)} · ${fmtNumber(c.token_count)} Tokens · Textlänge ${fmtNumber(c.text_length)}</div>
+          <div class="muted">Chunk ${fmtNumber(c.chunk_index)} · ${fmtNumber(c.token_count)} Tokens · Textlänge ${fmtNumber(c.text_length)} · <span class="mono">${esc(c.chunk_id)}</span></div>
           <p>${esc(String(c.text || '').slice(0, 600))}${(c.text || '').length > 600 ? '…' : ''}</p>
-        </div>`).join('') || '<p class="empty">Keine Chunks.</p>'}`;
-      $('#modal-body').innerHTML = html;
-    } catch (e) { $('#modal-body').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>'; }
+        </div>`).join('') || '<p class="empty">Keine Chunks.</p>'}
+      </div>
+
+      <div class="tab-panel" data-panel="vectors">
+        ${vectors.length ? `<div class="table-wrap"><table>
+          <thead><tr><th>Index</th><th>Vektor-ID</th><th>Chunk-ID</th><th>Seite</th></tr></thead>
+          <tbody>${vectors.map(v => `<tr>
+            <td>${fmtNumber(v.chunk_index)}</td>
+            <td class="mono">${esc(v.vector_id)}</td>
+            <td class="mono">${esc(v.chunk_id)}</td>
+            <td>${fmtNumber(v.page_start)}–${fmtNumber(v.page_end)}</td>
+          </tr>`).join('')}</tbody></table></div>` : '<p class="empty">Keine Vektoren.</p>'}
+      </div>
+
+      <div class="tab-panel" data-panel="source">
+        <dl class="kv">
+          <dt>Originaldatei</dt><dd>${esc(s.original_filename || d.filename)}</dd>
+          <dt>MIME-Typ</dt><dd>${esc(s.mime_type || d.mime_type)}</dd>
+          <dt>Encoding</dt><dd class="mono">${esc(s.encoding || '–')}</dd>
+          <dt>Originalgröße</dt><dd>${fmtBytes(s.file_size)}</dd>
+          <dt>SHA-256</dt><dd class="mono">${esc(s.sha256 || d.file_hash)}</dd>
+          <dt>Quellpfad (Eingabe)</dt><dd class="mono">${esc(d.source_path)}</dd>
+          <dt>Relativer Pfad</dt><dd class="mono">${esc(d.relative_path)}</dd>
+          <dt>Verfügbar</dt><dd>${s.source_available ? 'Ja' : 'Nein'}</dd>
+        </dl>
+      </div>
+
+      <div class="tab-panel" data-panel="metadata">
+        ${metaEntries.length ? `<pre class="code">${esc(JSON.stringify(meta, null, 2))}</pre>` : '<p class="empty">Keine Metadaten.</p>'}
+      </div>`;
+
+    $('#modal-body').innerHTML = html;
+    $$('#doc-tabs .tab').forEach(t => t.addEventListener('click', () => {
+      $$('#doc-tabs .tab').forEach(x => x.classList.toggle('active', x === t));
+      $$('#modal-body .tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
+    }));
   }
 
   async function deleteDocument(id) {
@@ -437,22 +524,60 @@
     const d = stats.documents || {};
     const j = stats.jobs || {};
     const t = stats.totals || {};
+    const st = stats.storage || {};
     const rows = (ext.extensions || []).map(x =>
       `<tr><td class="mono">${esc(x.extension)}</td><td>${fmtNumber(x.count)}</td><td>${fmtBytes(x.bytes)}</td></tr>`).join('');
     renderInto(el, `
       <div class="grid cards mb">
         <div class="card stat"><div class="value">${fmtNumber(d.total)}</div><div class="label">Dokumente</div></div>
+        <div class="card stat"><div class="value">${fmtNumber(d.versions)}</div><div class="label">Versionen</div></div>
+        <div class="card stat"><div class="value">${fmtNumber(d.multi_version)}</div><div class="label">Mit mehreren Versionen</div></div>
         <div class="card stat"><div class="value">${fmtNumber(d.processed)}</div><div class="label">Verarbeitet</div></div>
         <div class="card stat"><div class="value">${fmtNumber(d.failed)}</div><div class="label">Fehler</div></div>
-        <div class="card stat"><div class="value">${fmtNumber(j.completed)}</div><div class="label">Abgeschlossene Aufträge</div></div>
         <div class="card stat"><div class="value">${fmtNumber(t.chunks)}</div><div class="label">Chunks</div></div>
-        <div class="card stat"><div class="value">${fmtBytes(t.bytes)}</div><div class="label">Datenvolumen</div></div>
+      </div>
+      <div class="card mb">
+        <h2>Speicher</h2>
+        <div class="grid cards">
+          <div class="card stat"><div class="value">${fmtBytes(st.original_bytes)}</div><div class="label">Originaldaten</div></div>
+          <div class="card stat"><div class="value">${fmtBytes(st.base64_bytes)}</div><div class="label">Base64 (MySQL)</div></div>
+          <div class="card stat"><div class="value">${fmtNumber(st.base64_overhead_percent)} %</div><div class="label">Base64-Overhead</div></div>
+          <div class="card stat"><div class="value">${fmtBytes(st.mysql_bytes)}</div><div class="label">MySQL (Tabellen)</div></div>
+          <div class="card stat"><div class="value">${st.milvus_bytes == null ? '–' : fmtBytes(st.milvus_bytes)}</div><div class="label">Milvus</div></div>
+          <div class="card stat"><div class="value">${fmtBytes(st.total_bytes)}</div><div class="label">Gesamt (ohne Milvus)</div></div>
+        </div>
+        <p class="muted mt">Vektoren: ${fmtNumber(st.vectors ? st.vectors.total : 0)} gesamt, ${fmtNumber(st.vectors ? st.vectors.linked : 0)} verknüpft.</p>
+      </div>
+      <div class="card mb">
+        <div class="flex">
+          <h2 style="margin:0">Integrität</h2>
+          <button class="btn btn-primary btn-sm" id="integrity-run">Prüfung ausführen</button>
+        </div>
+        <div id="integrity-result" class="mt"><p class="muted">Noch nicht geprüft.</p></div>
       </div>
       <div class="card"><h2>Dokumente nach Dateiendung</h2>
         <div class="table-wrap"><table>
           <thead><tr><th>Endung</th><th>Anzahl</th><th>Bytes</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="3" class="muted">Keine Daten.</td></tr>'}</tbody>
         </table></div></div>`);
+
+    $('#integrity-run').addEventListener('click', async () => {
+      $('#integrity-result').innerHTML = '<div class="spinner">Prüfe…</div>';
+      try {
+        const r = await api('/api/integrity');
+        const issues = (r.issues || []).map(i => `<li>${esc(i.type)}: ${esc(i.detail || '')}</li>`).join('');
+        $('#integrity-result').innerHTML = `
+          <div class="grid cards">
+            <div class="card stat"><div class="value">${fmtNumber(r.inconsistencies)}</div><div class="label">Inkonsistenzen</div></div>
+            <div class="card stat"><div class="value">${fmtNumber(r.documents_without_blob)}</div><div class="label">Ohne Original</div></div>
+            <div class="card stat"><div class="value">${fmtNumber(r.hash_errors)}</div><div class="label">Hash-Fehler</div></div>
+            <div class="card stat"><div class="value">${fmtNumber(r.vectors_without_document)}</div><div class="label">Verwaiste Vektoren</div></div>
+            <div class="card stat"><div class="value">${fmtNumber(r.documents_without_vectors)}</div><div class="label">Dokumente ohne Vektoren</div></div>
+          </div>
+          ${issues ? '<h3>Details</h3><ul>' + issues + '</ul>' : ''}
+          <p class="muted">Milvus: ${r.milvus_available ? 'erreichbar' : 'nicht erreichbar'} · Vektoren gesamt: ${fmtNumber(r.vectors)}</p>`;
+      } catch (e) { $('#integrity-result').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>'; }
+    });
   }
 
   async function renderExport(el) {
@@ -475,15 +600,35 @@
         </div>
         <div class="card">
           <h2>Import</h2>
-          <p class="muted">Füge ein Export-Manifest (JSON) ein, um Dokumente und Chunks wiederherzustellen.</p>
+          <p class="muted">Lade ein Export-Archiv (.tar.gz) hoch, um Dokumente, Originale, Chunks und Vektoren vollständig und ID-erhaltend wiederherzustellen – oder füge ein Legacy-Manifest (JSON) ein.</p>
+          <label>Export-Archiv (.tar.gz)</label>
+          <input type="file" id="import-archive" accept=".tar.gz,.tgz,application/gzip">
+          <label>Konfliktstrategie</label>
+          <select id="import-strategy">
+            <option value="skip">Überspringen (empfohlen)</option>
+            <option value="overwrite">Überschreiben</option>
+          </select>
+          <div class="flex mt"><button class="btn btn-primary" id="import-archive-go">Archiv importieren</button></div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
           <label>Manifest (JSON)</label>
           <textarea id="import-manifest" class="mono" placeholder='{"documents":[…] }'></textarea>
-          <div class="flex mt"><button class="btn btn-primary" id="import-go">Importieren</button></div>
+          <div class="flex mt"><button class="btn btn-primary" id="import-go">Manifest importieren</button></div>
         </div>
       </div>`);
     $('#export-create').addEventListener('click', async () => {
       try { await api('/api/exports', { method: 'POST' }); notify('Export erstellt.', 'success'); navigate('export'); }
       catch (e) { notify(e.message, 'error'); }
+    });
+    $('#import-archive-go').addEventListener('click', async () => {
+      const input = $('#import-archive');
+      if (!input.files.length) { notify('Bitte eine .tar.gz-Datei auswählen.', 'error'); return; }
+      const fd = new FormData();
+      fd.append('archive', input.files[0]);
+      fd.append('strategy', $('#import-strategy').value);
+      try {
+        const res = await api('/api/import', { method: 'POST', body: fd });
+        notify('Import abgeschlossen: ' + fmtNumber(res.imported) + ' importiert, ' + fmtNumber(res.reused || 0) + ' wiederverwendet, ' + fmtNumber(res.skipped || 0) + ' übersprungen.', 'success');
+      } catch (e) { notify(e.message, 'error'); }
     });
     $('#import-go').addEventListener('click', async () => {
       let manifest;

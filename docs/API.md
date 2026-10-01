@@ -53,8 +53,14 @@ Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
 | GET | `/api/documents` | Dokumente auflisten (`?limit=`, `?search=`) |
-| GET | `/api/documents/{id}` | Dokument-Details |
+| GET | `/api/documents/{id}` | Dokument-Details (inkl. Chunks, Versionen, Quelle) |
 | DELETE | `/api/documents/{id}` | Dokument löschen |
+| GET | `/api/documents/{id}/source` | Quell-Metadaten des Originals |
+| GET | `/api/documents/{id}/versions` | Alle Versionen des Dokuments |
+| GET | `/api/documents/{id}/chunks` | Chunks der aktuellen Version |
+| GET | `/api/documents/{id}/vectors` | Vektoren der aktuellen Version |
+| GET | `/api/documents/{id}/download` | Originaldatei als binärer Download |
+| GET | `/api/documents/{id}/metadata` | Metadaten der aktuellen Version |
 
 ### Ordner & Upload
 
@@ -69,6 +75,18 @@ Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
 | --- | --- | --- |
 | GET | `/api/statistics` | Gesamtstatistiken |
 | GET | `/api/statistics/extensions` | Statistiken je Dateityp |
+| GET | `/api/storage` | Speicheraufteilung (Originale, Base64, Vektoren) |
+| GET | `/api/integrity` | Integritätsprüfung (Blobs, Hashes, Vektoren, Collections) |
+
+### Quellen & Vektoren (Referenzen)
+
+| Methode | Pfad | Beschreibung |
+| --- | --- | --- |
+| GET | `/api/vectors/{id}` | Vektor-Datensatz (MySQL) |
+| GET | `/api/vectors/{id}/document` | Zugehöriges Dokument (Milvus → Original) |
+| GET | `/api/chunks/{id}` | Chunk-Datensatz |
+| GET | `/api/chunks/{id}/source` | Quelle eines Chunks |
+| GET | `/api/source/{document_version_id}` | Quelle einer bestimmten Version |
 
 ### Kollektionen (Milvus)
 
@@ -84,7 +102,7 @@ Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
 | GET | `/api/exports` | Exporte auflisten |
 | POST | `/api/exports` | Export anlegen |
 | GET | `/api/exports/{id}/download` | Export herunterladen |
-| POST | `/api/import` | Import ausführen |
+| POST | `/api/import` | Import ausführen (multipart `archive` + `strategy`, oder JSON `manifest`) |
 
 ### TLS / Zertifikate
 

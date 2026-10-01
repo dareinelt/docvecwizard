@@ -68,7 +68,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS documents (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  document_id VARCHAR(36) NOT NULL UNIQUE,
+  document_id VARCHAR(36) NOT NULL,
+  document_version_id VARCHAR(36) NOT NULL,
+  version INT NOT NULL DEFAULT 1,
+  is_current TINYINT(1) NOT NULL DEFAULT 1,
   job_id BIGINT UNSIGNED NULL,
   source_path VARCHAR(1024) NOT NULL,
   relative_path VARCHAR(1024) NOT NULL DEFAULT '',
@@ -77,6 +80,7 @@ CREATE TABLE IF NOT EXISTS documents (
   mime_type VARCHAR(128) NOT NULL DEFAULT '',
   file_size BIGINT NOT NULL DEFAULT 0,
   file_hash CHAR(64) NOT NULL,
+  blob_id BIGINT UNSIGNED NULL,
   created_at DATETIME NULL,
   modified_at DATETIME NULL,
   indexed_at DATETIME NULL,
@@ -90,11 +94,35 @@ CREATE TABLE IF NOT EXISTS documents (
   processing_status VARCHAR(32) NOT NULL DEFAULT 'DISCOVERED',
   processing_duration INT NOT NULL DEFAULT 0,
   error_message TEXT NULL,
+  metadata JSON NULL,
   CONSTRAINT fk_documents_job FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL,
+  UNIQUE INDEX idx_documents_version_id (document_version_id),
   INDEX idx_documents_hash (file_hash),
   INDEX idx_documents_job (job_id),
   INDEX idx_documents_status (processing_status),
-  INDEX idx_documents_filename (filename)
+  INDEX idx_documents_filename (filename),
+  INDEX idx_documents_group_current (document_id, version),
+  INDEX idx_documents_is_current (is_current),
+  INDEX idx_documents_blob (blob_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
+-- Original document payloads (Base64). One blob per document version.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS document_blobs (
+  blob_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  document_id VARCHAR(36) NOT NULL,
+  document_version_id VARCHAR(36) NOT NULL,
+  encoding VARCHAR(32) NOT NULL DEFAULT 'base64',
+  mime_type VARCHAR(128) NOT NULL DEFAULT '',
+  original_filename VARCHAR(512) NOT NULL DEFAULT '',
+  file_size BIGINT NOT NULL DEFAULT 0,
+  sha256 CHAR(64) NOT NULL,
+  base64_data LONGTEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE INDEX idx_blobs_version (document_version_id),
+  INDEX idx_blobs_document (document_id),
+  INDEX idx_blobs_sha256 (sha256)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -104,6 +132,7 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   document_id BIGINT UNSIGNED NOT NULL,
   chunk_id VARCHAR(36) NOT NULL UNIQUE,
+  vector_id VARCHAR(36) NULL,
   chunk_index INT NOT NULL,
   page_start INT NOT NULL DEFAULT 0,
   page_end INT NOT NULL DEFAULT 0,
@@ -111,7 +140,8 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   token_count INT NOT NULL DEFAULT 0,
   text MEDIUMTEXT NOT NULL,
   CONSTRAINT fk_chunks_document FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
-  INDEX idx_chunks_document (document_id)
+  INDEX idx_chunks_document (document_id),
+  INDEX idx_chunks_vector (vector_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -186,7 +216,7 @@ CREATE TABLE IF NOT EXISTS exports (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   export_id VARCHAR(36) NOT NULL UNIQUE,
   filename VARCHAR(255) NOT NULL DEFAULT '',
-  `format` VARCHAR(32) NOT NULL DEFAULT 'tar.zst',
+  `format` VARCHAR(32) NOT NULL DEFAULT 'tar.gz',
   status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
   manifest JSON NULL,
   checksum CHAR(64) NOT NULL DEFAULT '',
