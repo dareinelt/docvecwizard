@@ -1,0 +1,61 @@
+# Continuous integration without a running stack: syntax checks, unit tests
+# and configuration validation. Integration and smoke tests need the full
+# Docker Compose stack and are run manually (see docs/TESTING.md).
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  php:
+    name: PHP lint + unit tests
+    runs-on: ubuntu-latest
+    container: php:8.3-cli-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check (php -l)
+        run: |
+          fail=0
+          for f in $(find app tests -name '*.php'); do
+            php -l "$f" >/dev/null || fail=1
+          done
+          exit $fail
+      - name: Unit tests
+        run: php tests/unit/run.php
+
+  frontend:
+    name: JavaScript syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node --check web/html/assets/js/app.js
+
+  python:
+    name: Python compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m py_compile embedding/src/*.py converter/src/*.py
+
+  compose:
+    name: Compose config + migrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml with .env.example
+        run: |
+          cp .env.example .env
+          docker compose config -q
+          docker compose --profile tools config -q
+      - name: Migrations in app/ and database/ must be identical
+        run: diff -r app/migrations database/migrations
