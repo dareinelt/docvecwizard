@@ -209,18 +209,20 @@ final class ProcessingService
         $current = Db::fetchOne('SELECT version FROM documents WHERE document_id = ? ORDER BY version DESC LIMIT 1', [$documentId]);
         $version = ((int) ($current['version'] ?? 0)) + 1;
 
-        // Retire the current version so it never points at the new vectors.
-        Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ? AND is_current = 1', [$documentId]);
-
-        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, Uuid::v4(), $version);
+        // Retiring the previous version happens inside the same transaction as
+        // the insert (see insertDocumentVersion), so a failed blob store can
+        // never leave a document without any current version.
+        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, Uuid::v4(), $version, true);
     }
 
     /**
-     * Insert one document version plus its original-file blob atomically.
+     * Insert one document version plus its original-file blob atomically. With
+     * $retirePrevious the hitherto current version of the same document is set
+     * to `is_current = 0` in the same transaction.
      *
      * @param array<string,mixed> $job
      */
-    private function insertDocumentVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, string $documentVersionId, int $version): void
+    private function insertDocumentVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, string $documentVersionId, int $version, bool $retirePrevious = false): void
     {
         $stat = stat($absolute);
         $isStat = is_array($stat);
@@ -229,7 +231,10 @@ final class ProcessingService
         $mtime = $isStat && isset($stat['mtime']) ? gmdate('Y-m-d H:i:s', $stat['mtime']) : null;
         $ext = strtolower(pathinfo($absolute, PATHINFO_EXTENSION));
 
-        Db::transaction(function () use ($job, $absolute, $relative, $hash, $documentId, $documentVersionId, $version, $size, $ctime, $mtime, $ext): void {
+        Db::transaction(function () use ($job, $absolute, $relative, $hash, $documentId, $documentVersionId, $version, $size, $ctime, $mtime, $ext, $retirePrevious): void {
+            if ($retirePrevious) {
+                Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ? AND is_current = 1', [$documentId]);
+            }
             Db::execute(
                 'INSERT INTO documents (document_id, document_version_id, version, is_current, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, created_at, modified_at, processing_status, embedding_model, embedding_dimension)
                  VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "DISCOVERED", ?, ?)',
