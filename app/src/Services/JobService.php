@@ -85,6 +85,11 @@ final class JobService
         if (!is_file($sourcePath)) {
             throw new \InvalidArgumentException('Die Quelldatei existiert nicht mehr: ' . basename($sourcePath));
         }
+        $limitLabel = Config::string('MAX_DOCUMENT_SIZE', ProcessingService::DEFAULT_MAX_DOCUMENT_SIZE);
+        $oversize = ProcessingService::oversizeMessage((int) (@filesize($sourcePath) ?: 0), UploadService::parseSize($limitLabel), $limitLabel);
+        if ($oversize !== null) {
+            throw new \InvalidArgumentException($oversize);
+        }
         $modelService = new ModelService();
         $model = $modelService->findByName((string) $doc['embedding_model']) ?? $modelService->active();
         if ($model === null) {

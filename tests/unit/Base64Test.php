@@ -58,3 +58,20 @@ test('Base64::sha256 streams across chunk boundaries', function (): void {
     $encoded = base64_encode($original);
     assert_eq(hash('sha256', $original), Base64::sha256($encoded));
 });
+
+test('Base64::encodeFile matches base64_encode for sizes around the chunk boundary', function (): void {
+    $tmp = tempnam(sys_get_temp_dir(), 'b64');
+    try {
+        foreach ([0, 1, 2, 3, 4, 3 * 65536 - 1, 3 * 65536, 3 * 65536 + 1, 2 * 3 * 65536 + 5] as $len) {
+            $bytes = $len > 0 ? random_bytes($len) : '';
+            file_put_contents($tmp, $bytes);
+            assert_eq(base64_encode($bytes), Base64::encodeFile($tmp), 'len ' . $len);
+        }
+    } finally {
+        @unlink($tmp);
+    }
+});
+
+test('Base64::encodeFile returns null for unreadable paths', function (): void {
+    assert_eq(null, Base64::encodeFile(sys_get_temp_dir() . '/does-not-exist-' . bin2hex(random_bytes(4))));
+});

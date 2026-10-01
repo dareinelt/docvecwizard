@@ -91,6 +91,8 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | --- | --- | --- |
 | `UPLOAD_MAX_SIZE` | `100M` | Maximale Größe je Upload-Datei (setzt auch PHP `upload_max_filesize`) |
 | `POST_MAX_SIZE` | `200M` | Maximale Request-Größe (PHP `post_max_size`; nginx `client_max_body_size` = 200m) |
+| `MAX_DOCUMENT_SIZE` | `100M` | Maximale Größe eines Quelldokuments bei der Discovery. Größere Dateien werden als Dokumentversion mit Status `FAILED` und Fehlermeldung registriert (ohne Blob, Eintrag in `processing_errors`, Schritt `discover`) und bleiben so im Auftrag sichtbar. Beim nächsten Auftrag wird die Größe erneut geprüft; nach einer Erhöhung des Limits wird die Datei nachträglich übernommen. Richtwert: Base64-Blob ≈ 1,34 × Dateigröße muss unter MariaDB `max_allowed_packet` (256M) und `PHP_MEMORY_LIMIT` bleiben. `0` deaktiviert die Prüfung |
+| `PHP_MEMORY_LIMIT` | `384M` | PHP `memory_limit` in `app` und `worker` (Container-`mem_limit` 512m) |
 | `IMPORT_MAX_ENTRIES` | `200000` | Maximale Anzahl Einträge in einem Import-Archiv |
 | `IMPORT_MAX_BYTES` | `10737418240` | Maximale entpackte Größe eines Import-Archivs (Bytes) |
 | `CONVERT_TIMEOUT` | `300` | Timeout der Konvertierung |

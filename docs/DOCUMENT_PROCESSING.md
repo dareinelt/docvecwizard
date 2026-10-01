@@ -84,6 +84,24 @@ Summen landen in `jobs.documents_skipped` / `jobs.documents_requeued`, im
 Audit-Eintrag `job.discover` und werden in der Auftragsansicht angezeigt
 („Keine neuen Dokumente – N übersprungen“).
 
+### Größenlimit (`MAX_DOCUMENT_SIZE`)
+
+Vor dem Anlegen prüft die Discovery die Dateigröße gegen `MAX_DOCUMENT_SIZE`
+(Standard `100M`, reine Regel `ProcessingService::oversizeMessage()`):
+
+| Situation | Verhalten |
+| --- | --- |
+| Neues Dokument / neue Version, zu groß | Versionszeile wird mit `FAILED`, deutscher `error_message` und ohne Blob angelegt; Eintrag in `processing_errors` (Schritt `discover`) |
+| Unveränderte `FAILED`/`PENDING`-Version, weiterhin zu groß | Version wechselt zum neuen Job und bleibt `FAILED` (kein Requeue) |
+| Unveränderte `FAILED`-Version ohne Blob, Limit inzwischen erhöht | normales Requeue; der Blob wird dabei nachgespeichert |
+| Unverändert und bereits `COMPLETED` | unverändert übersprungen (Größe irrelevant) |
+
+`POST /api/documents/{id}/retry` lehnt weiterhin zu große Dateien mit `400`
+und derselben Meldung ab. Der Original-Blob wird chunkweise Base64-kodiert
+(`Base64::encodeFile`), Spitzenbedarf ≈ 1,34 × Dateigröße; das Limit muss
+daher unter `PHP_MEMORY_LIMIT` (384M) und MariaDB `max_allowed_packet` (256M)
+bleiben.
+
 ## Verarbeitungsstatus
 
 | Status | Bedeutung |
