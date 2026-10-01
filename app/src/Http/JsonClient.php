@@ -101,7 +101,7 @@ final class JsonClient
             $message = is_array($decoded) && isset($decoded['detail'])
                 ? (is_string($decoded['detail']) ? $decoded['detail'] : (string) json_encode($decoded['detail']))
                 : (is_array($decoded) && isset($decoded['error']) ? (string) $decoded['error'] : 'HTTP ' . $status);
-            throw new UpstreamException(sprintf('%s %s -> %d: %s', $method, $url, $status, $message));
+            throw new UpstreamException(sprintf('%s %s -> %d: %s', $method, $url, $status, $message), $status);
         }
 
         Logger::channel('http')->debug('request', ['method' => $method, 'url' => $url, 'status' => $status]);

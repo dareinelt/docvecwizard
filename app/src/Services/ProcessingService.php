@@ -265,7 +265,8 @@ final class ProcessingService
             $chunks = $this->chunkByPage($text, $pageCount, $doc['extension'] === 'pdf');
 
             $collection = MilvusClient::collectionFor((string) $doc['embedding_model']);
-            $dimension = (int) $doc['embedding_dimension'];
+            $model = (string) $doc['embedding_model'];
+            $dimension = $this->expectedDimension($model, (int) $doc['embedding_dimension']);
             $this->ensureCollection($collection, $dimension, 'cosine');
 
             // FIX (idempotency): a document left in PROCESSING by a crashed or
@@ -288,7 +289,7 @@ final class ProcessingService
             $storedChunks = 0;
             foreach (array_chunk($chunks, $batchSize) as $batch) {
                 $texts = array_map(static fn (array $c): string => $c['text'], $batch);
-                $embeddings = $this->embedding->embedBatch($texts);
+                $embeddings = $this->embedWithModel($texts, $model, $dimension);
                 foreach ($batch as $i => $chunk) {
                     $vector = $this->findEmbedding($embeddings, $i);
                     if ($vector === null) {
@@ -358,6 +359,60 @@ final class ProcessingService
 
             return ['status' => 'FAILED', 'error' => $e->getMessage()];
         }
+    }
+
+    /**
+     * Authoritative vector dimension for a model: `embedding_models.dimension`
+     * (synced from the service catalog). The value stored on the document/job at
+     * creation time must agree, otherwise the Milvus collection would not fit.
+     */
+    private function expectedDimension(string $model, int $documentDimension): int
+    {
+        $row = (new ModelService())->findByName($model);
+        $catalogDimension = $row !== null ? (int) $row['dimension'] : 0;
+        if ($catalogDimension <= 0) {
+            if ($documentDimension <= 0) {
+                throw new \RuntimeException(sprintf('Für das Embedding-Modell "%s" ist keine Vektordimension bekannt.', $model));
+            }
+
+            return $documentDimension;
+        }
+        if ($documentDimension > 0 && $documentDimension !== $catalogDimension) {
+            throw new \RuntimeException(sprintf(
+                'Dimension des Auftrags (%d) weicht von der Dimension des Modells "%s" (%d) ab.',
+                $documentDimension,
+                $model,
+                $catalogDimension
+            ));
+        }
+
+        return $catalogDimension;
+    }
+
+    /**
+     * Embed a batch with the job's model. If the embedding service has a
+     * different model loaded (e.g. after a container restart it loaded
+     * EMBEDDING_DEFAULT_MODEL), load the expected model and retry once. The
+     * returned vectors are dimension-checked before they reach Milvus.
+     *
+     * @param list<string> $texts
+     * @return list<list<float>>
+     */
+    private function embedWithModel(array $texts, string $model, int $dimension): array
+    {
+        try {
+            $vectors = $this->embedding->embedBatch($texts, $model);
+        } catch (ModelMismatchException $e) {
+            Logger::channel('worker')->warning('embedding service has another model loaded; activating job model', [
+                'expected' => $e->expected,
+                'loaded' => $e->loaded,
+            ]);
+            $this->embedding->activate($model);
+            $vectors = $this->embedding->embedBatch($texts, $model);
+        }
+        EmbeddingClient::assertDimension($vectors, $dimension, $model);
+
+        return $vectors;
     }
 
     /**

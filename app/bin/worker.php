@@ -101,12 +101,17 @@ while (!Db::lock(WORKER_LOCK, 10)) {
 $log->info('worker lock acquired');
 
 // Sync model catalog from the embedding service (dimension metadata is
-// authoritative and must never be hard-coded).
+// authoritative and must never be hard-coded), then make sure the service has
+// the DB-active model loaded (after a restart it boots with the default model).
 try {
-    $synced = (new ModelService())->syncFromCatalog(new EmbeddingClient());
+    $modelService = new ModelService();
+    $embeddingClient = new EmbeddingClient();
+    $synced = $modelService->syncFromCatalog($embeddingClient);
     $log->info('model catalog synced', ['models' => $synced]);
+    $reconciled = $modelService->reconcileWithService($embeddingClient);
+    $log->info('active model reconciled', $reconciled);
 } catch (\Throwable $e) {
-    $log->warning('model catalog sync failed; using DB metadata', ['error' => $e->getMessage()]);
+    $log->warning('model catalog sync / reconcile failed; using DB metadata', ['error' => $e->getMessage()]);
 }
 
 recoverStaleWork();
@@ -186,6 +191,18 @@ while (!$stopping) {
         $idleLogs++;
         if ($idleLogs % 30 === 1) {
             $log->debug('worker idle');
+        }
+        // The embedding container may restart at any time and boot with
+        // EMBEDDING_DEFAULT_MODEL; re-align it with the DB-active model while idle.
+        if ($idleLogs % 30 === 0) {
+            try {
+                $reconciled = (new ModelService())->reconcileWithService(new EmbeddingClient());
+                if ($reconciled['action'] !== 'in_sync' && $reconciled['action'] !== 'none') {
+                    $log->info('active model reconciled', $reconciled);
+                }
+            } catch (\Throwable $e) {
+                $log->debug('model reconcile skipped', ['error' => $e->getMessage()]);
+            }
         }
         sleep($pollSeconds);
     }

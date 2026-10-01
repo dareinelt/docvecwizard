@@ -216,6 +216,10 @@ else:
 class EmbedRequest(BaseModel):
     texts: list[str] = Field(..., min_length=1)
     batch_size: int = 32
+    # Optional expected model. If set and different from the loaded model the
+    # request is rejected (409) instead of silently returning vectors of
+    # another dimension.
+    model: Optional[str] = None
 
 
 class ModelActiveRequest(BaseModel):
@@ -269,6 +273,16 @@ def _embed(req: EmbedRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="texts must not be empty")
     if req.batch_size < 1 or req.batch_size > 256:
         raise HTTPException(status_code=400, detail="batch_size must be in [1, 256]")
+    expected = (req.model or "").strip()
+    if expected:
+        loaded = manager._active_name
+        if loaded is None:
+            raise HTTPException(status_code=503, detail="no model loaded")
+        if expected != loaded:
+            raise HTTPException(
+                status_code=409,
+                detail=f"model mismatch: requested {expected}, loaded {loaded}",
+            )
     try:
         vectors = manager.embed(req.texts, batch_size=req.batch_size)
     except HTTPException:

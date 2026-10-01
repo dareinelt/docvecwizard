@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Core\Db;
+use App\Http\HttpException;
 
 /**
  * Semantic search: embed the query, search the active model's Milvus
@@ -35,12 +36,21 @@ final class SearchService
         if ($model === null) {
             throw new \InvalidArgumentException('No embedding model available');
         }
-        $vector = (new EmbeddingClient())->embedBatch([$query])[0] ?? null;
+        $modelName = (string) $model['name'];
+        try {
+            // Send the expected model: the service answers 409 if another
+            // model is loaded instead of returning vectors of a foreign dimension.
+            $vectors = (new EmbeddingClient())->embedBatch([$query], $modelName);
+        } catch (ModelMismatchException $e) {
+            throw HttpException::conflict($e->getMessage() . ' Bitte das Modell unter „System“ aktivieren oder warten, bis der laufende Auftrag abgeschlossen ist.');
+        }
+        $vector = $vectors[0] ?? null;
         if (!is_array($vector) || $vector === []) {
             throw new \App\Http\UpstreamException('Embedding service returned no vector for the query');
         }
+        EmbeddingClient::assertDimension([$vector], (int) $model['dimension'], $modelName);
         $milvus = new MilvusClient();
-        $collection = MilvusClient::collectionFor((string) $model['name']);
+        $collection = MilvusClient::collectionFor($modelName);
         if (!$milvus->hasCollection($collection)) {
             return [];
         }
