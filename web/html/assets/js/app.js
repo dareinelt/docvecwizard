@@ -363,7 +363,7 @@
         <td class="mono">${esc(j.source_directory)}</td>
         <td class="mono">${esc(j.embedding_model)}</td>
         <td>${statusBadge(j.status)}</td>
-        <td>${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</td>
+        <td>${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}${Number(j.documents_skipped) > 0 ? ` <span class="muted" title="Bereits indizierte oder inhaltsgleiche Dateien wurden übersprungen">(${fmtNumber(j.documents_skipped)} übersprungen)</span>` : ''}</td>
         <td>${fmtDate(j.created_at)}</td>
       </tr>`).join('')}</tbody>
     </table></div>`;
@@ -696,6 +696,17 @@
     } catch (e) { notify(e.message, 'error'); }
   }
 
+  function discoverySummary(j) {
+    const skipped = Number(j.documents_skipped) || 0;
+    const requeued = Number(j.documents_requeued) || 0;
+    if (!skipped && !requeued) return '';
+    const parts = [];
+    if (Number(j.documents_total) === 0 && skipped) parts.push('Keine neuen Dokumente');
+    if (skipped) parts.push(fmtNumber(skipped) + ' Datei(en) übersprungen (bereits indiziert oder inhaltsgleich mit einem vorhandenen Dokument)');
+    if (requeued) parts.push(fmtNumber(requeued) + ' zuvor fehlgeschlagene/geparkte Dokument(e) erneut eingeplant');
+    return '<p class="muted">' + esc(parts.join(' · ')) + '</p>';
+  }
+
   function showJob(j) {
     const status = String(j.status).toUpperCase();
     const cancellable = ['RUNNING', 'CREATED'].includes(status);
@@ -707,6 +718,7 @@
         <div class="card stat"><div class="value">${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</div><div class="label">Dokumente</div></div>
       </div>
       ${j.error_message ? `<p class="form-error">${esc(j.error_message)}</p>` : ''}
+      ${discoverySummary(j)}
       ${resumable && Number(j.documents_pending) > 0 ? `<p class="muted">${fmtNumber(j.documents_pending)} Dokument(e) warten auf Fortsetzung.</p>` : ''}
       <details><summary>Rohdaten</summary><pre class="code">${esc(JSON.stringify(j, null, 2))}</pre></details>
       <div class="flex mt">

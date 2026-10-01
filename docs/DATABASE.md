@@ -67,6 +67,7 @@ Key/Value-Konfiguration (Laufzeit-Einstellungen, Chunking, Modell).
 | status | VARCHAR(32) | CREATED/RUNNING/COMPLETED/FAILED/CANCELLED |
 | created_at / started_at / finished_at | DATETIME | |
 | documents_total / pending / processing / processed / failed | INT | Zähler |
+| documents_skipped / documents_requeued | INT | Discovery-Ergebnis: übersprungene Dateien (unverändert, inhaltsgleich, unlesbar) bzw. erneut eingeplante FAILED/PENDING-Versionen (Migration 0004) |
 | chunks_total / vectors_total | INT | |
 | tokens_total / bytes_total | BIGINT | |
 | error_count | INT | |

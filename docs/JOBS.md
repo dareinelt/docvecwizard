@@ -94,6 +94,8 @@ Pro Job werden geführt:
 
 - `documents_total`, `documents_pending`, `documents_processing`,
   `documents_processed`, `documents_failed`
+- `documents_skipped`, `documents_requeued` (Discovery-Ergebnis, siehe
+  [DOCUMENT_PROCESSING.md](DOCUMENT_PROCESSING.md#deduplizierung))
 - `chunks_total`, `vectors_total`
 - `tokens_total`, `bytes_total`
 - `error_count`

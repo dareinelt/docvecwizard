@@ -49,11 +49,16 @@ final class ProcessingService
      * Scan the job's source directory and register discovered files. Versions
      * are grouped by stable source path (a grouping hint only — identity is the
      * generated `document_id`/`document_version_id`), and identical content is
-     * deduplicated by SHA-256. Returns the number of newly created versions.
+     * deduplicated by SHA-256.
+     *
+     * Every skipped file is logged with its reason and the totals are written
+     * to `jobs.documents_skipped` / `jobs.documents_requeued` plus an audit
+     * entry, so a job that ends with "0 new documents" is explainable.
      *
      * @param array<string,mixed> $job
+     * @return array{scanned:int,new:int,new_versions:int,requeued:int,skipped_unchanged:int,skipped_duplicate:int,unreadable:int}
      */
-    public function discover(array $job): int
+    public function discover(array $job): array
     {
         $root = Config::string('INPUT_ROOT', '/srv/data/input');
         $source = $job['source_directory'];
@@ -63,12 +68,15 @@ final class ProcessingService
         }
         $recursive = (bool) $job['recursive'];
         $files = $this->scanFiles($absolute, $recursive);
-        $newCount = 0;
+        $stats = ['scanned' => count($files), 'new' => 0, 'new_versions' => 0, 'requeued' => 0, 'skipped_unchanged' => 0, 'skipped_duplicate' => 0, 'unreadable' => 0];
+        $log = Logger::channel('worker');
         $previousJobs = [];
         foreach ($files as $file) {
             $relative = ltrim(substr($file, strlen($absolute)), '/');
-            $hash = hash_file('sha256', $file);
+            $hash = @hash_file('sha256', $file);
             if ($hash === false) {
+                $stats['unreadable']++;
+                $log->warning('discovery: file not readable, skipped', ['job_id' => $job['job_id'], 'path' => $relative]);
                 continue;
             }
 
@@ -76,14 +84,16 @@ final class ProcessingService
                 'SELECT id, document_id, job_id, file_hash, processing_status FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
                 [$file]
             );
-            $hashElsewhere = $current === null
-                && Db::fetchOne('SELECT id FROM documents WHERE file_hash = ? LIMIT 1', [$hash]) !== null;
+            $duplicate = $current === null
+                ? Db::fetchOne('SELECT document_id, source_path FROM documents WHERE file_hash = ? LIMIT 1', [$hash])
+                : null;
 
-            switch (self::discoveryDecision($current, $hash, $hashElsewhere)) {
+            $decision = self::discoveryDecision($current, $hash, $duplicate !== null);
+            switch ($decision) {
                 case self::DECISION_NEW_VERSION:
                     // Same source path, different content -> new version.
                     $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
-                    $newCount++;
+                    $stats['new_versions']++;
                     break;
                 case self::DECISION_REQUEUE:
                     // Same content, but the last attempt failed or was left over by a
@@ -91,17 +101,34 @@ final class ProcessingService
                     // silently skipping it forever.
                     $this->requeue($job, $current);
                     $previousJobs[(int) $current['job_id']] = true;
-                    $newCount++;
+                    $stats['requeued']++;
+                    $log->info('discovery: requeued document', ['job_id' => $job['job_id'], 'path' => $relative, 'previous_status' => $current['processing_status']]);
                     break;
                 case self::DECISION_NEW:
                     $this->insertDiscovered($job, $file, $relative, $hash);
-                    $newCount++;
+                    $stats['new']++;
+                    break;
+                case self::DECISION_SKIP_DUPLICATE:
+                    $stats['skipped_duplicate']++;
+                    $log->info('discovery: skipped, identical content already stored', [
+                        'job_id' => $job['job_id'],
+                        'path' => $relative,
+                        'existing_document_id' => $duplicate['document_id'] ?? null,
+                        'existing_source_path' => $duplicate['source_path'] ?? null,
+                    ]);
                     break;
                 default:
-                    // skip_unchanged / skip_duplicate
+                    $stats['skipped_unchanged']++;
+                    $log->debug('discovery: skipped, unchanged', ['job_id' => $job['job_id'], 'path' => $relative, 'status' => $current['processing_status'] ?? null]);
                     break;
             }
         }
+
+        Db::execute(
+            'UPDATE jobs SET documents_skipped = ?, documents_requeued = ? WHERE id = ?',
+            [$stats['skipped_unchanged'] + $stats['skipped_duplicate'] + $stats['unreadable'], $stats['requeued'], (int) $job['id']]
+        );
+        Audit::record('job.discover', 'job', (string) $job['job_id'], $stats);
 
         // The requeued documents now count towards this job; keep the
         // counters of the jobs they came from consistent.
@@ -112,7 +139,7 @@ final class ProcessingService
             }
         }
 
-        return $newCount;
+        return $stats;
     }
 
     public const DECISION_SKIP_UNCHANGED = 'skip_unchanged';

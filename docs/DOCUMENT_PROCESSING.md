@@ -67,17 +67,32 @@ Chunks werden mit `chunk_index`, `page_start`, `page_end`, `text_length`,
 
 ## Deduplizierung
 
-Jede Datei wird per **SHA-256** (`file_hash`) gehasht. Bereits bekannte Hashes
-werden übersprungen, sodass identische Dateien nicht doppelt indiziert werden.
+Jede Datei wird per **SHA-256** (`file_hash`) gehasht. Die Entscheidung je
+Datei trifft `ProcessingService::discoveryDecision()`:
+
+| Situation | Entscheidung |
+| --- | --- |
+| Pfad bekannt, Inhalt unverändert, Version `COMPLETED`/`DISCOVERED`/`PROCESSING` | überspringen (`skip_unchanged`) |
+| Pfad bekannt, Inhalt unverändert, Version `FAILED`/`PENDING` | erneut einplanen (`requeue`, Dokument wechselt zum neuen Job) |
+| Pfad bekannt, Inhalt geändert | neue Version (`new_version`) |
+| Pfad neu, Inhalt (Hash) bereits unter anderem Pfad gespeichert | überspringen (`skip_duplicate`, **global** über alle Ordner) |
+| Pfad neu, Inhalt neu | neues Dokument (`new`) |
+
+Übersprungene Dateien sind nicht unsichtbar: Jeder Skip wird im Worker-Log
+mit Grund (und beim Duplikat mit dem vorhandenen Dokument) protokolliert, die
+Summen landen in `jobs.documents_skipped` / `jobs.documents_requeued`, im
+Audit-Eintrag `job.discover` und werden in der Auftragsansicht angezeigt
+(„Keine neuen Dokumente – N übersprungen“).
 
 ## Verarbeitungsstatus
 
 | Status | Bedeutung |
 | --- | --- |
 | `DISCOVERED` | Datei erkannt, noch nicht verarbeitet |
+| `PENDING` | durch Abbruch des Jobs geparkt; wird bei Resume oder durch einen späteren Job wieder aufgenommen |
 | `PROCESSING` | wird gerade verarbeitet |
 | `COMPLETED` | erfolgreich abgeschlossen |
-| `FAILED` | Fehler aufgetreten (Details in `error_message`) |
+| `FAILED` | Fehler aufgetreten (Details in `error_message`); erneut verarbeitbar über `POST /api/documents/{id}/retry` oder einen neuen Job |
 
 ## Fehlerbehandlung
 

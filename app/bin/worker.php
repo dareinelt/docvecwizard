@@ -132,7 +132,7 @@ while (!$stopping) {
             $job['status'] = 'RUNNING';
             try {
                 $found = $processor->discover($job);
-                $log->info('discovered documents', ['job_id' => $job['job_id'], 'new' => $found]);
+                $log->info('discovery finished', ['job_id' => $job['job_id']] + $found);
             } catch (\Throwable $e) {
                 $log->error('discovery failed', ['job_id' => $job['job_id'], 'error' => $e->getMessage()]);
                 $jobService->setStatus((int) $job['id'], JobService::STATUS_FAILED);
