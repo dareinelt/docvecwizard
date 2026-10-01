@@ -15,6 +15,7 @@ JSON file; the *dimension* is never hard-coded in the embedding code itself.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -29,6 +30,9 @@ from pydantic import BaseModel, Field
 
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "/models"))
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "catalog.json"
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s embedding: %(message)s")
+log = logging.getLogger("embedding")
 
 
 def load_catalog() -> list[dict[str, Any]]:
@@ -182,18 +186,40 @@ class ModelManager:
 app = FastAPI(title="embedding-service", version="0.1.0")
 manager = ModelManager(load_catalog())
 
-# Eagerly load the default model (if downloaded) at startup.
+# Eagerly load the default model at startup. Missing models are NOT downloaded
+# here (no internet on the backend network); the state is logged loudly and
+# exposed via /health so operators see why embedding is unavailable.
 _default = os.environ.get("EMBEDDING_DEFAULT_MODEL", "").strip()
-if _default and _default in manager.catalog and manager.is_downloaded(_default):
+if not _default:
+    manager._load_error = "EMBEDDING_DEFAULT_MODEL is not set; no model loaded"
+    log.warning(manager._load_error)
+elif _default not in manager.catalog:
+    manager._load_error = f"EMBEDDING_DEFAULT_MODEL={_default!r} is not in catalog.json"
+    log.error(manager._load_error)
+elif not manager.is_downloaded(_default):
+    manager._load_error = (
+        f"model {_default} is not present in {MODELS_DIR}/{_default} "
+        f"(expected config.json + *.safetensors). Download it with: "
+        f"docker compose --profile tools run --rm model-download"
+    )
+    log.error(manager._load_error)
+else:
     try:
+        log.info("loading default model %s", _default)
         manager.load(_default)
+        log.info("model %s loaded", _default)
     except Exception as exc:  # noqa: BLE001 - startup best effort
         manager._load_error = str(exc)  # type: ignore[attr-defined]
+        log.exception("failed to load default model %s", _default)
 
 
 class EmbedRequest(BaseModel):
     texts: list[str] = Field(..., min_length=1)
     batch_size: int = 32
+    # Optional expected model. If set and different from the loaded model the
+    # request is rejected (409) instead of silently returning vectors of
+    # another dimension.
+    model: Optional[str] = None
 
 
 class ModelActiveRequest(BaseModel):
@@ -203,9 +229,12 @@ class ModelActiveRequest(BaseModel):
 @app.get("/health")
 def health() -> dict[str, Any]:
     active = manager._active_name
+    loaded = manager.has_active()
+    # "ok" = process alive AND a model is loaded. Without a model the service
+    # cannot embed anything, which the PHP health aggregation reports as degraded.
     return {
-        "status": "ok",
-        "model_loaded": manager.has_active(),
+        "status": "ok" if loaded else "degraded",
+        "model_loaded": loaded,
         "model": active,
         "error": manager._load_error,
     }
@@ -244,6 +273,16 @@ def _embed(req: EmbedRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="texts must not be empty")
     if req.batch_size < 1 or req.batch_size > 256:
         raise HTTPException(status_code=400, detail="batch_size must be in [1, 256]")
+    expected = (req.model or "").strip()
+    if expected:
+        loaded = manager._active_name
+        if loaded is None:
+            raise HTTPException(status_code=503, detail="no model loaded")
+        if expected != loaded:
+            raise HTTPException(
+                status_code=409,
+                detail=f"model mismatch: requested {expected}, loaded {loaded}",
+            )
     try:
         vectors = manager.embed(req.texts, batch_size=req.batch_size)
     except HTTPException:

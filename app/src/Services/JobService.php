@@ -17,7 +17,6 @@ final class JobService
     public const STATUS_COMPLETED = JobStatus::Completed->value;
     public const STATUS_FAILED = JobStatus::Failed->value;
     public const STATUS_CANCELLED = JobStatus::Cancelled->value;
-    public const STATUS_PAUSED = JobStatus::Paused->value;
 
     /**
      * @param array{name:string,source_directory:string,recursive:bool,embedding_model:string} $input
@@ -68,6 +67,68 @@ final class JobService
         return $this->getByUuid($jobId) ?? ['job_id' => $jobId];
     }
 
+    /**
+     * Re-process a single FAILED document version. Creates a small job that
+     * starts directly in RUNNING (no discovery pass) and attaches the current
+     * version to it; the worker then picks it up like any discovered document.
+     *
+     * @param array<string,mixed> $doc current version row from `documents`
+     * @return array<string,mixed> the new job
+     * @throws \InvalidArgumentException with a user-facing (German) message
+     */
+    public function retryDocument(array $doc): array
+    {
+        if ((int) ($doc['is_current'] ?? 0) !== 1 || (string) $doc['processing_status'] !== 'FAILED') {
+            throw new \InvalidArgumentException('Nur fehlgeschlagene aktuelle Dokumentversionen können erneut verarbeitet werden.');
+        }
+        $sourcePath = (string) $doc['source_path'];
+        if (!is_file($sourcePath)) {
+            throw new \InvalidArgumentException('Die Quelldatei existiert nicht mehr: ' . basename($sourcePath));
+        }
+        $limitLabel = Config::string('MAX_DOCUMENT_SIZE', ProcessingService::DEFAULT_MAX_DOCUMENT_SIZE);
+        $oversize = ProcessingService::oversizeMessage((int) (@filesize($sourcePath) ?: 0), UploadService::parseSize($limitLabel), $limitLabel);
+        if ($oversize !== null) {
+            throw new \InvalidArgumentException($oversize);
+        }
+        $modelService = new ModelService();
+        $model = $modelService->findByName((string) $doc['embedding_model']) ?? $modelService->active();
+        if ($model === null) {
+            throw new \InvalidArgumentException('Kein Embedding-Modell verfügbar.');
+        }
+
+        $root = rtrim(Config::string('INPUT_ROOT', '/srv/data/input'), '/');
+        $dir = dirname($sourcePath);
+        $source = str_starts_with($dir, $root . '/') ? substr($dir, strlen($root) + 1) : ($dir === $root ? '' : $dir);
+
+        $jobId = Uuid::v4();
+        $now = gmdate('Y-m-d H:i:s');
+        Db::execute(
+            'INSERT INTO jobs (job_id, name, source_directory, `recursive`, embedding_model, embedding_dimension, status, started_at)
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?)',
+            [
+                $jobId,
+                mb_substr('Erneut: ' . (string) $doc['filename'], 0, 255),
+                $source,
+                $model['name'],
+                (int) $model['dimension'],
+                self::STATUS_RUNNING,
+                $now,
+            ]
+        );
+        $job = $this->getByUuid($jobId);
+        if ($job === null) {
+            throw new \RuntimeException('Auftrag konnte nicht angelegt werden.');
+        }
+        (new ProcessingService())->requeue($job, $doc);
+        $this->refreshCounters((int) $job['id']);
+        if ((int) $doc['job_id'] !== (int) $job['id']) {
+            $this->refreshCounters((int) $doc['job_id']);
+        }
+        Audit::record('document.retry', 'document', (string) $doc['document_id'], ['job_id' => $jobId]);
+
+        return $this->getByUuid($jobId) ?? $job;
+    }
+
     /** @return list<array<string,mixed>> */
     public function list(int $limit = 100, int $offset = 0): array
     {
@@ -113,7 +174,59 @@ final class JobService
             return;
         }
         $this->setStatus($id, self::STATUS_CANCELLED);
+        // Open documents of a cancelled job are parked as PENDING by the worker
+        // sweep (worker.php) and picked up again by resume() or a later job.
+        Db::execute(
+            'UPDATE documents SET processing_status = "PENDING" WHERE job_id = ? AND processing_status = "DISCOVERED"',
+            [$id]
+        );
+        $this->refreshCounters($id);
         Audit::record('job.cancel', 'job', (string) $job['job_id']);
+    }
+
+    /**
+     * Resume a cancelled job: it goes back to RUNNING and its parked (PENDING)
+     * documents are processed. Documents that are still PROCESSING (worker is
+     * mid-document) are left alone; the worker re-processes them idempotently.
+     *
+     * @throws \InvalidArgumentException with a user-facing (German) message
+     */
+    public function resume(int $id): void
+    {
+        $job = $this->getById($id);
+        if ($job === null) {
+            throw new \InvalidArgumentException('Job not found');
+        }
+        $status = JobStatus::tryFrom((string) $job['status']);
+        if ($status === null || !$status->isResumable()) {
+            throw new \InvalidArgumentException(sprintf('Nur abgebrochene Aufträge können fortgesetzt werden (Status: %s).', (string) $job['status']));
+        }
+        // A job cancelled before its discovery pass (never started) goes back
+        // to CREATED so the worker discovers its files; otherwise straight to
+        // RUNNING so the parked documents are processed.
+        $target = $job['started_at'] === null ? self::STATUS_CREATED : self::STATUS_RUNNING;
+        Db::transaction(function () use ($id, $target): void {
+            Db::execute(
+                'UPDATE documents SET processing_status = "DISCOVERED" WHERE job_id = ? AND processing_status = "PENDING"',
+                [$id]
+            );
+            Db::execute(
+                'UPDATE jobs SET status = ?, finished_at = NULL, error_message = NULL WHERE id = ?',
+                [$target, $id]
+            );
+        });
+        $this->refreshCounters($id);
+        Audit::record('job.resume', 'job', (string) $job['job_id']);
+    }
+
+    /**
+     * Final status of a job whose documents are all settled: FAILED only when
+     * nothing succeeded at all, otherwise COMPLETED (partial failures are
+     * visible through documents_failed / processing_errors).
+     */
+    public static function finalStatus(int $failed, int $processed): string
+    {
+        return $failed > 0 && $processed === 0 ? self::STATUS_FAILED : self::STATUS_COMPLETED;
     }
 
     /** Recompute aggregate counters for a job. */

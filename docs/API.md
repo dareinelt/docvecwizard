@@ -56,7 +56,8 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/jobs` | Jobs auflisten (`?limit=`) |
 | POST | `/api/jobs` | Job anlegen |
 | GET | `/api/jobs/{id}` | Job-Details |
-| POST | `/api/jobs/{id}/cancel` | Job abbrechen |
+| POST | `/api/jobs/{id}/cancel` | Job abbrechen (offene Dokumente werden als `PENDING` geparkt) |
+| POST | `/api/jobs/{id}/resume` | Abgebrochenen Job fortsetzen (400, wenn nicht `CANCELLED`) |
 
 ### Dokumente
 
@@ -65,6 +66,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/documents` | Dokumente auflisten (`?limit=`, `?search=`) |
 | GET | `/api/documents/{id}` | Dokument-Details (inkl. Chunks, Versionen, Quelle) |
 | DELETE | `/api/documents/{id}` | Dokument löschen |
+| POST | `/api/documents/{id}/retry` | Fehlgeschlagene aktuelle Version erneut verarbeiten (legt einen laufenden Ein-Dokument-Auftrag an; 202, 400 wenn nicht `FAILED` oder Quelldatei fehlt) |
 | GET | `/api/documents/{id}/source` | Quell-Metadaten des Originals |
 | GET | `/api/documents/{id}/versions` | Alle Versionen des Dokuments |
 | GET | `/api/documents/{id}/chunks` | Chunks der aktuellen Version |
@@ -96,7 +98,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/vectors/{id}/document` | Zugehöriges Dokument (Milvus → Original) |
 | GET | `/api/chunks/{id}` | Chunk-Datensatz |
 | GET | `/api/chunks/{id}/source` | Quelle eines Chunks |
-| GET | `/api/source/{document_version_id}` | Quelle einer bestimmten Version |
+| GET | `/api/source/{id}` | Quelle einer bestimmten Version (`id` = `document_version_id`) |
 
 ### Kollektionen (Milvus)
 
@@ -128,7 +130,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
-| POST | `/api/search` | Semantische Suche (`{query, limit}`) |
+| POST | `/api/search` | Semantische Suche (`{query, limit}`, limit 1–50). Liefert nur Treffer aktueller Dokumentversionen; 409, wenn der Embedding-Dienst ein anderes als das aktive Modell geladen hat |
 
 ## Beispiele
 

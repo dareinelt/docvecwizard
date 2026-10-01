@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   documents_processing INT NOT NULL DEFAULT 0,
   documents_processed INT NOT NULL DEFAULT 0,
   documents_failed INT NOT NULL DEFAULT 0,
+  documents_skipped INT NOT NULL DEFAULT 0,
+  documents_requeued INT NOT NULL DEFAULT 0,
   chunks_total INT NOT NULL DEFAULT 0,
   vectors_total INT NOT NULL DEFAULT 0,
   tokens_total BIGINT NOT NULL DEFAULT 0,

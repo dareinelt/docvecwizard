@@ -56,10 +56,12 @@ final class Routes
         $router->post('/api/jobs', [$jobs, 'create']);
         $router->get('/api/jobs/{id}', [$jobs, 'show']);
         $router->post('/api/jobs/{id}/cancel', [$jobs, 'cancel']);
+        $router->post('/api/jobs/{id}/resume', [$jobs, 'resume']);
 
         $router->get('/api/documents', [$documents, 'index']);
         $router->get('/api/documents/{id}', [$documents, 'show']);
         $router->delete('/api/documents/{id}', [$documents, 'delete']);
+        $router->post('/api/documents/{id}/retry', [$documents, 'retry']);
         $router->get('/api/documents/{id}/source', [$documents, 'source']);
         $router->get('/api/documents/{id}/versions', [$documents, 'versions']);
         $router->get('/api/documents/{id}/chunks', [$documents, 'chunks']);

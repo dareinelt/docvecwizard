@@ -11,4 +11,9 @@ namespace App\Http;
  */
 final class UpstreamException extends \RuntimeException
 {
+    /** HTTP status returned by the upstream service (0 = network error / unknown). */
+    public function __construct(string $message, public readonly int $status = 0)
+    {
+        parent::__construct($message);
+    }
 }

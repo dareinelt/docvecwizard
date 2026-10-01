@@ -59,7 +59,11 @@ final class SystemService
     private function embedding(): bool
     {
         try {
-            return (new EmbeddingClient())->health()['status'] === 'ok';
+            $health = (new EmbeddingClient())->health();
+
+            // The service reports "degraded" (and model_loaded=false) when no
+            // model is loaded, e.g. because it was never downloaded.
+            return ($health['status'] ?? '') === 'ok' && ($health['model_loaded'] ?? false) === true;
         } catch (\Throwable) {
             return false;
         }
@@ -81,6 +85,12 @@ final class SystemService
             'INSERT INTO system_metrics (service, metric, value, meta) VALUES (?, ?, ?, ?)',
             [$service, $metric, $value, $meta === [] ? null : json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)]
         );
+    }
+
+    /** Delete metric snapshots older than $days days; returns the number of deleted rows. */
+    public function pruneMetrics(int $days = 30): int
+    {
+        return Db::execute('DELETE FROM system_metrics WHERE recorded_at < (UTC_TIMESTAMP() - INTERVAL ? DAY)', [max(1, $days)]);
     }
 
     /** @return list<array<string,mixed>> */

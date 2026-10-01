@@ -80,8 +80,11 @@ Siehe [EXPORT_IMPORT.md](EXPORT_IMPORT.md) für Details.
 ## Statusanzeigen
 
 - Aufträge haben die Status `CREATED`, `RUNNING`, `COMPLETED`, `FAILED`,
-  `CANCELLED`, `PAUSED`.
-- Dokumente haben die Status `DISCOVERED`, `PROCESSING`, `COMPLETED`, `FAILED`.
+  `CANCELLED`. Abgebrochene Aufträge lassen sich über **Auftrag fortsetzen**
+  wieder aufnehmen.
+- Dokumente haben die Status `DISCOVERED`, `PENDING` (geparkt durch Abbruch),
+  `PROCESSING`, `COMPLETED`, `FAILED`. Fehlgeschlagene Dokumente können in der
+  Dokumentansicht über **Erneut verarbeiten** neu eingeplant werden.
 
 ## Tastatur & Bedienung
 

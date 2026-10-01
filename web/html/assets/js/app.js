@@ -58,7 +58,7 @@
   const STATUS_LABELS = {
     COMPLETED: 'Abgeschlossen', RUNNING: 'Läuft', CREATED: 'Erstellt', PENDING: 'Wartend',
     PROCESSING: 'In Verarbeitung', DISCOVERED: 'Gefunden', FAILED: 'Fehlgeschlagen',
-    CANCELLED: 'Abgebrochen', IMPORTED: 'Importiert', PAUSED: 'Pausiert',
+    CANCELLED: 'Abgebrochen', IMPORTED: 'Importiert',
   };
 
   function statusBadge(status) {
@@ -67,7 +67,6 @@
       COMPLETED: 'badge-green', RUNNING: 'badge-blue', CREATED: 'badge-gray',
       PENDING: 'badge-gray', PROCESSING: 'badge-blue', DISCOVERED: 'badge-gray',
       FAILED: 'badge-red', CANCELLED: 'badge-amber', IMPORTED: 'badge-green',
-      PAUSED: 'badge-amber',
     };
     const label = STATUS_LABELS[s] || status || '–';
     return '<span class="badge ' + (map[s] || 'badge-gray') + '" title="' + esc(status || '') + '">' + esc(label) + '</span>';
@@ -364,7 +363,7 @@
         <td class="mono">${esc(j.source_directory)}</td>
         <td class="mono">${esc(j.embedding_model)}</td>
         <td>${statusBadge(j.status)}</td>
-        <td>${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</td>
+        <td>${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}${Number(j.documents_skipped) > 0 ? ` <span class="muted" title="Bereits indizierte oder inhaltsgleiche Dateien wurden übersprungen">(${fmtNumber(j.documents_skipped)} übersprungen)</span>` : ''}</td>
         <td>${fmtDate(j.created_at)}</td>
       </tr>`).join('')}</tbody>
     </table></div>`;
@@ -471,6 +470,7 @@
         </div>
         <div class="flex mb">
           ${s.source_available ? `<a class="btn btn-primary" href="/api/documents/${enc(d.document_id)}/download">Original herunterladen</a>` : '<span class="muted">Original nicht verfügbar</span>'}
+          ${String(d.processing_status).toUpperCase() === 'FAILED' ? '<button class="btn" type="button" id="doc-retry">Erneut verarbeiten</button>' : ''}
         </div>
         <dl class="kv">
           <dt>Dokument-ID</dt><dd class="mono">${esc(d.document_id)}</dd>
@@ -534,6 +534,17 @@
 
     $('#modal-title').textContent = 'Dokument: ' + (d.filename || '');
     $('#modal-body').innerHTML = html;
+    const retry = $('#doc-retry');
+    if (retry) retry.addEventListener('click', async () => {
+      await busy(retry, async () => {
+        try {
+          await api('/api/documents/' + enc(d.document_id) + '/retry', { method: 'POST' });
+          notify('Dokument wird erneut verarbeitet (neuer Auftrag angelegt).', 'success');
+          closeModal();
+          navigate('jobs', true);
+        } catch (e) { notify(e.message, 'error'); }
+      });
+    });
     const tabButtons = $$('#doc-tabs .tab');
     const select = t => {
       tabButtons.forEach(x => {
@@ -685,8 +696,21 @@
     } catch (e) { notify(e.message, 'error'); }
   }
 
+  function discoverySummary(j) {
+    const skipped = Number(j.documents_skipped) || 0;
+    const requeued = Number(j.documents_requeued) || 0;
+    if (!skipped && !requeued) return '';
+    const parts = [];
+    if (Number(j.documents_total) === 0 && skipped) parts.push('Keine neuen Dokumente');
+    if (skipped) parts.push(fmtNumber(skipped) + ' Datei(en) übersprungen (bereits indiziert oder inhaltsgleich mit einem vorhandenen Dokument)');
+    if (requeued) parts.push(fmtNumber(requeued) + ' zuvor fehlgeschlagene/geparkte Dokument(e) erneut eingeplant');
+    return '<p class="muted">' + esc(parts.join(' · ')) + '</p>';
+  }
+
   function showJob(j) {
-    const cancellable = ['RUNNING', 'CREATED', 'PENDING', 'PAUSED'].includes(String(j.status).toUpperCase());
+    const status = String(j.status).toUpperCase();
+    const cancellable = ['RUNNING', 'CREATED'].includes(status);
+    const resumable = status === 'CANCELLED';
     openModal('Auftrag: ' + (j.name || ''), `
       <div class="grid cards mb">
         <div class="card stat"><div class="value">${esc(j.name)}</div><div class="label">Name</div></div>
@@ -694,13 +718,25 @@
         <div class="card stat"><div class="value">${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</div><div class="label">Dokumente</div></div>
       </div>
       ${j.error_message ? `<p class="form-error">${esc(j.error_message)}</p>` : ''}
+      ${discoverySummary(j)}
+      ${resumable && Number(j.documents_pending) > 0 ? `<p class="muted">${fmtNumber(j.documents_pending)} Dokument(e) warten auf Fortsetzung.</p>` : ''}
       <details><summary>Rohdaten</summary><pre class="code">${esc(JSON.stringify(j, null, 2))}</pre></details>
-      <div class="flex mt">${cancellable ? '<button class="btn btn-danger" type="button" id="job-cancel">Auftrag abbrechen</button>' : ''}</div>`);
+      <div class="flex mt">
+        ${cancellable ? '<button class="btn btn-danger" type="button" id="job-cancel">Auftrag abbrechen</button>' : ''}
+        ${resumable ? '<button class="btn btn-primary" type="button" id="job-resume">Auftrag fortsetzen</button>' : ''}
+      </div>`);
     const cancel = $('#job-cancel');
     if (cancel) cancel.addEventListener('click', async () => {
       if (!confirm('Auftrag „' + j.name + '“ wirklich abbrechen?')) return;
       await busy(cancel, async () => {
         try { await api('/api/jobs/' + enc(j.job_id) + '/cancel', { method: 'POST' }); notify('Auftrag abgebrochen.', 'success'); closeModal(); navigate('jobs', true); }
+        catch (e) { notify(e.message, 'error'); }
+      });
+    });
+    const resume = $('#job-resume');
+    if (resume) resume.addEventListener('click', async () => {
+      await busy(resume, async () => {
+        try { await api('/api/jobs/' + enc(j.job_id) + '/resume', { method: 'POST' }); notify('Auftrag wird fortgesetzt.', 'success'); closeModal(); navigate('jobs', true); }
         catch (e) { notify(e.message, 'error'); }
       });
     });
@@ -1002,6 +1038,7 @@
     renderInto(el, `
       <div class="grid split">
         <section class="card" aria-labelledby="set-title"><h2 id="set-title">Einstellungen</h2>
+          <p class="muted">Freie Schlüssel/Wert-Paare in der Datenbank (z.&nbsp;B. für Notizen oder externe Integrationen). Sie steuern <strong>nicht</strong> die Verarbeitung: Chunking, Embedding und Worker werden ausschließlich über Umgebungsvariablen (<code>.env</code>) konfiguriert, das aktive Modell unter „System“.</p>
           <form id="settings-form">
           ${keys.length
             ? keys.map((k, i) => `<label for="set-${i}">${esc(k)}</label><input id="set-${i}" name="${esc(k)}" value="${esc(settings[k])}" maxlength="4096">`).join('')

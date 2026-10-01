@@ -77,3 +77,46 @@ test('Chunker::chunk preserves overlap across chunk boundaries', function (): vo
     $tailWord = end($firstWords);
     assert_contains($tailWord, $chunks[1]['text']);
 });
+
+test('Chunker minTokens merges a tiny trailing remainder into the previous chunk', function (): void {
+    // 28 estimated tokens; maxTokens 28 forces the 2-token tail into a second chunk.
+    $a = str_repeat('alpha beta gamma delta ', 4);
+    $tail = 'Ende.';
+    $text = trim($a) . "\n\n" . $tail;
+
+    $without = (new Chunker(28, 0, 100, 0))->chunk($text);
+    assert_count(2, $without);
+    assert_eq('Ende.', $without[1]['text']);
+
+    $with = (new Chunker(28, 0, 100, 10))->chunk($text);
+    assert_count(1, $with);
+    assert_true(str_ends_with($with[0]['text'], "\n\nEnde."));
+    assert_eq(trim($a) . "\n\nEnde.", $with[0]['text']);
+});
+
+test('Chunker minTokens does not duplicate the overlap when merging', function (): void {
+    $a = str_repeat('alpha beta gamma delta ', 4);
+    $text = trim($a) . "\n\nEnde.";
+    $chunks = (new Chunker(28, 4, 100, 10))->chunk($text);
+    assert_count(1, $chunks);
+    assert_eq(1, substr_count($chunks[0]['text'], 'Ende.'));
+    assert_eq(trim($a) . "\n\nEnde.", $chunks[0]['text']);
+});
+
+test('Chunker minTokens never exceeds the hard maximum', function (): void {
+    $a = str_repeat('alpha beta gamma delta ', 4);
+    $text = trim($a) . "\n\nEnde.";
+    // hardMax equals maxTokens: merging would overflow, so the small chunk stays.
+    $chunks = (new Chunker(28, 0, 28, 10))->chunk($text);
+    assert_count(2, $chunks);
+    foreach ($chunks as $c) {
+        assert_true($c['token_count'] <= 28);
+    }
+});
+
+test('Chunker minTokens leaves a sufficiently large last chunk alone', function (): void {
+    $a = str_repeat('alpha beta gamma delta ', 4);
+    $b = str_repeat('eins zwei drei vier ', 5);
+    $chunks = (new Chunker(28, 0, 100, 10))->chunk(trim($a) . "\n\n" . trim($b));
+    assert_count(2, $chunks);
+});

@@ -92,6 +92,43 @@ final class ModelService
     }
 
     /**
+     * Reconcile the DB flag `embedding_models.active` with the model actually
+     * loaded in the embedding service. The DB is authoritative (it holds the
+     * operator's choice; the service merely boots with EMBEDDING_DEFAULT_MODEL):
+     *  - DB has an active model and the service has another one loaded -> load
+     *    the DB model into the service.
+     *  - DB has no active model yet -> adopt the service's loaded model (first
+     *    start) so search and jobs have a defined model.
+     *
+     * @return array{db:?string,service:?string,action:string}
+     */
+    public function reconcileWithService(EmbeddingClient $embedding): array
+    {
+        $db = $this->active();
+        $dbName = $db !== null ? (string) $db['name'] : null;
+        $serviceName = $embedding->activeModel()['active'];
+
+        if ($dbName === null) {
+            if ($serviceName !== null && $this->findByName($serviceName) !== null) {
+                Db::transaction(function () use ($serviceName): void {
+                    Db::execute('UPDATE embedding_models SET active = 0');
+                    Db::execute('UPDATE embedding_models SET active = 1 WHERE name = ?', [$serviceName]);
+                });
+
+                return ['db' => $serviceName, 'service' => $serviceName, 'action' => 'adopted_service_model'];
+            }
+
+            return ['db' => null, 'service' => $serviceName, 'action' => 'none'];
+        }
+        if ($serviceName === $dbName) {
+            return ['db' => $dbName, 'service' => $serviceName, 'action' => 'in_sync'];
+        }
+        $embedding->activate($dbName);
+
+        return ['db' => $dbName, 'service' => $dbName, 'action' => 'loaded_db_model'];
+    }
+
+    /**
      * Activate a model: set the single active flag in DB and ask the embedding
      * service to load it. Returns the model row or throws on unknown model.
      *

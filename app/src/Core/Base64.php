@@ -12,6 +12,35 @@ namespace App\Core;
 final class Base64
 {
     /**
+     * Base64-encode a file in chunks. Peak memory is the encoded result plus
+     * one chunk — not the raw bytes *and* the result as with
+     * `base64_encode(file_get_contents())`. Returns null when the file cannot
+     * be read.
+     */
+    public static function encodeFile(string $path): ?string
+    {
+        $handle = @fopen($path, 'rb');
+        if ($handle === false) {
+            return null;
+        }
+        $encoded = '';
+        // Multiples of 3 bytes encode to complete Base64 groups, so chunk
+        // outputs can simply be concatenated.
+        while (!feof($handle)) {
+            $part = fread($handle, 3 * 65536);
+            if ($part === false) {
+                fclose($handle);
+
+                return null;
+            }
+            $encoded .= base64_encode($part);
+        }
+        fclose($handle);
+
+        return $encoded;
+    }
+
+    /**
      * Decode a Base64 payload strictly. Returns null when the input contains
      * invalid characters or non-zero padding bits (i.e. is not valid Base64).
      */

@@ -40,14 +40,22 @@ docker compose restart app worker
 
 ## Modelle verwalten
 
-Die verfügbaren Modelle sind in `embedding/catalog.json` definiert. In der
-Oberfläche unter **Einstellungen** bzw. über die API:
+Die verfügbaren Modelle sind in `embedding/catalog.json` definiert; ihre
+Gewichte müssen vorab mit `docker compose --profile tools run --rm model-download`
+bereitgestellt werden (siehe [EMBEDDING.md](EMBEDDING.md)). In der Oberfläche
+unter **System** bzw. über die API:
 
 | Aktion | Endpoint |
 | --- | --- |
 | Modelle anzeigen | `GET /api/models` |
 | Modell aktivieren | `POST /api/models/activate` |
 | Modelle synchronisieren | `POST /api/models/sync` |
+
+Das aktive Modell steht in `embedding_models.active` (Datenbank) und ist
+maßgeblich: Der Worker lädt es bei Bedarf in den Embedding-Dienst, der nach
+einem Neustart zunächst `EMBEDDING_DEFAULT_MODEL` geladen hat. Die Suche
+verwendet immer das aktive Modell; während ein Auftrag mit einem anderen
+Modell läuft, antwortet sie mit HTTP 409 und einem Hinweis.
 
 Ein Modellwechsel erzeugt eine neue Milvus-Collection (`docvec_<modellname>`),
 da sich die Vektordimension unterscheidet.

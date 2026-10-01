@@ -17,6 +17,9 @@ networks:
   backend:
     driver: bridge
     internal: true
+  # Internet-capable network used ONLY by the one-shot model download tool.
+  tools:
+    driver: bridge
 
 volumes:
   db_data:
@@ -128,6 +131,39 @@ services:
     cpus: 6
 
   # ---------------------------------------------------------------------------
+  # Model download (tool, not part of the running stack)
+  #
+  # The embedding service itself has no internet access (network `backend` is
+  # internal) and only loads models that already exist in ./embedding/models.
+  # Run this one-shot tool once (and after adding models to EMBEDDING_MODELS):
+  #
+  #   docker compose --profile tools run --rm model-download
+  #
+  # It uses the same image as `embedding`, but on the `tools` network with
+  # internet access. Runs as root so the bind mount is writable regardless of
+  # host ownership; the embedding service only needs read access.
+  # ---------------------------------------------------------------------------
+  model-download:
+    build:
+      context: ./embedding
+    profiles: ["tools"]
+    restart: "no"
+    user: "0:0"
+    command: ["python", "scripts/download-models.py"]
+    environment:
+      EMBEDDING_MODELS: ${EMBEDDING_MODELS:-Qwen3-Embedding-0.6B}
+      MODELS_DIR: /models
+      HF_HOME: /models/.cache
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./embedding/models:/models
+    networks:
+      - tools
+    mem_limit: 2g
+
+  # ---------------------------------------------------------------------------
   # Document converter - PDF/DOCX/PPTX/... -> text/markdown
   # ---------------------------------------------------------------------------
   converter:
@@ -180,6 +216,8 @@ services:
       EXPORT_ROOT: /srv/data/exports
       UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-100M}
       POST_MAX_SIZE: ${POST_MAX_SIZE:-200M}
+      MAX_DOCUMENT_SIZE: ${MAX_DOCUMENT_SIZE:-100M}
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-384M}
       IMPORT_MAX_ENTRIES: ${IMPORT_MAX_ENTRIES:-200000}
       IMPORT_MAX_BYTES: ${IMPORT_MAX_BYTES:-10737418240}
       SESSION_SECRET: ${SESSION_SECRET}
@@ -235,12 +273,12 @@ services:
       INPUT_ROOT: ${INPUT_ROOT}
       STAGING_ROOT: ${STAGING_ROOT}
       EXPORT_ROOT: /srv/data/exports
-      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY}
-      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE}
-      WORKER_LOCK_TIMEOUT: ${WORKER_LOCK_TIMEOUT}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2}
+      MAX_DOCUMENT_SIZE: ${MAX_DOCUMENT_SIZE:-100M}
+      PHP_MEMORY_LIMIT: ${PHP_MEMORY_LIMIT:-384M}
       CHUNK_SIZE_TOKENS: ${CHUNK_SIZE_TOKENS}
       CHUNK_OVERLAP_TOKENS: ${CHUNK_OVERLAP_TOKENS}
-      CHUNK_MIN_TOKENS: ${CHUNK_MIN_TOKENS}
+      CHUNK_MIN_TOKENS: ${CHUNK_MIN_TOKENS:-50}
       CHUNK_MAX_TOKENS: ${CHUNK_MAX_TOKENS}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-16}
       LOG_LEVEL: ${LOG_LEVEL}

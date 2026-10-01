@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Core\Db;
+use App\Core\Uuid;
+use App\Http\HttpException;
 
 /**
  * Semantic search: embed the query, search the active model's Milvus
@@ -35,18 +37,108 @@ final class SearchService
         if ($model === null) {
             throw new \InvalidArgumentException('No embedding model available');
         }
-        $vector = (new EmbeddingClient())->embedBatch([$query])[0] ?? null;
+        $modelName = (string) $model['name'];
+        try {
+            // Send the expected model: the service answers 409 if another
+            // model is loaded instead of returning vectors of a foreign dimension.
+            $vectors = (new EmbeddingClient())->embedBatch([$query], $modelName);
+        } catch (ModelMismatchException $e) {
+            throw HttpException::conflict($e->getMessage() . ' Bitte das Modell unter „System“ aktivieren oder warten, bis der laufende Auftrag abgeschlossen ist.');
+        }
+        $vector = $vectors[0] ?? null;
         if (!is_array($vector) || $vector === []) {
             throw new \App\Http\UpstreamException('Embedding service returned no vector for the query');
         }
+        EmbeddingClient::assertDimension([$vector], (int) $model['dimension'], $modelName);
         $milvus = new MilvusClient();
-        $collection = MilvusClient::collectionFor((string) $model['name']);
+        $collection = MilvusClient::collectionFor($modelName);
         if (!$milvus->hasCollection($collection)) {
             return [];
         }
-        $result = $milvus->search($collection, [$vector], $limit, (string) $model['distance_metric']);
+        $metric = (string) $model['distance_metric'];
 
-        return $this->hydrate($result);
+        // Old document versions keep their vectors (immutable history), so
+        // Milvus returns hits for retired versions too. Over-fetch candidates
+        // and keep only chunks whose version is still `is_current = 1`; if the
+        // candidate set is exhausted, escalate once with a larger window.
+        $rows = [];
+        foreach (self::candidateWindows($limit) as $window) {
+            $result = $milvus->search($collection, [$vector], $window, $metric);
+            $candidates = array_values(array_filter($result['data'] ?? [], 'is_array'));
+            $rows = self::filterCurrent($candidates, [$this, 'currentVersionIds'], $limit);
+            if (count($rows) >= $limit || count($candidates) < $window) {
+                break;
+            }
+        }
+
+        return $this->hydrate(['data' => $rows]);
+    }
+
+    /**
+     * Candidate window sizes for a requested result count.
+     *
+     * @return list<int>
+     */
+    public static function candidateWindows(int $limit): array
+    {
+        return [min(250, max($limit * 5, 20)), 1000];
+    }
+
+    /**
+     * Keep the first $limit hits whose `document_version_id` is current.
+     * Pure apart from the injected lookup so the rule can be unit-tested.
+     *
+     * @param list<array<string,mixed>> $hits ordered Milvus hits
+     * @param callable(list<string>):array<string,true> $currentLookup returns the subset of version ids that are current
+     * @return list<array<string,mixed>>
+     */
+    public static function filterCurrent(array $hits, callable $currentLookup, int $limit): array
+    {
+        $versionIds = [];
+        foreach ($hits as $hit) {
+            $v = (string) ($hit['document_version_id'] ?? '');
+            if ($v !== '') {
+                $versionIds[$v] = true;
+            }
+        }
+        $current = $versionIds === [] ? [] : $currentLookup(array_keys($versionIds));
+
+        $kept = [];
+        foreach ($hits as $hit) {
+            $v = (string) ($hit['document_version_id'] ?? '');
+            if ($v === '' || !isset($current[$v])) {
+                continue;
+            }
+            $kept[] = $hit;
+            if (count($kept) >= $limit) {
+                break;
+            }
+        }
+
+        return $kept;
+    }
+
+    /**
+     * @param list<string> $versionIds
+     * @return array<string,true>
+     */
+    private function currentVersionIds(array $versionIds): array
+    {
+        $valid = array_values(array_filter($versionIds, static fn (string $v): bool => Uuid::isValid($v)));
+        if ($valid === []) {
+            return [];
+        }
+        $placeholders = implode(',', array_fill(0, count($valid), '?'));
+        $rows = Db::fetchAll(
+            "SELECT document_version_id FROM documents WHERE is_current = 1 AND document_version_id IN ($placeholders)",
+            $valid
+        );
+        $out = [];
+        foreach ($rows as $row) {
+            $out[(string) $row['document_version_id']] = true;
+        }
+
+        return $out;
     }
 
     /** @param array<string,mixed> $result @return list<array<string,mixed>> */

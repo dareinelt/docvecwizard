@@ -32,12 +32,16 @@ chmod 0700 /app/storage/sessions 2>/dev/null || true
 # Keep post_max_size in line with nginx's client_max_body_size.
 UPLOAD_MAX_SIZE="${UPLOAD_MAX_SIZE:-100M}"
 POST_MAX_SIZE="${POST_MAX_SIZE:-200M}"
-case "$UPLOAD_MAX_SIZE$POST_MAX_SIZE" in
-  *[!0-9KMGkmg]*) echo "invalid UPLOAD_MAX_SIZE/POST_MAX_SIZE" >&2; exit 1 ;;
+# memory_limit: PHP's default of 128M is too small for storing a 100M document
+# as Base64 blob (~1.34x the file size). Container mem_limit is 512m.
+PHP_MEMORY_LIMIT="${PHP_MEMORY_LIMIT:-384M}"
+case "$UPLOAD_MAX_SIZE$POST_MAX_SIZE$PHP_MEMORY_LIMIT" in
+  *[!0-9KMGkmg-]*) echo "invalid UPLOAD_MAX_SIZE/POST_MAX_SIZE/PHP_MEMORY_LIMIT" >&2; exit 1 ;;
 esac
 cat > /usr/local/etc/php/conf.d/zz-docvecwizard.ini <<EOF
 upload_max_filesize = ${UPLOAD_MAX_SIZE}
 post_max_size = ${POST_MAX_SIZE}
+memory_limit = ${PHP_MEMORY_LIMIT}
 max_file_uploads = 100
 expose_php = Off
 display_errors = Off

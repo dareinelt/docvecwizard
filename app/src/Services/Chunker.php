@@ -11,10 +11,17 @@ namespace App\Services;
  */
 final class Chunker
 {
+    /**
+     * @param int $minTokens minimum size of the *last* chunk: a trailing
+     *        remainder smaller than this is appended to the previous chunk
+     *        (as long as the hard maximum is respected) instead of becoming a
+     *        tiny chunk of its own. 0 disables the merge.
+     */
     public function __construct(
         private readonly int $maxTokens = 512,
         private readonly int $overlapTokens = 64,
         private readonly int $hardMaxTokens = 1024,
+        private readonly int $minTokens = 0,
     ) {
     }
 
@@ -58,6 +65,7 @@ final class Chunker
         $chunks = [];
         $current = '';
         $currentTokens = 0;
+        $lastOverlap = '';
 
         foreach ($segments as $segment) {
             $segTokens = self::estimateTokens($segment);
@@ -70,6 +78,7 @@ final class Chunker
                     $chunks[] = $this->makeChunk($current);
                     $current = '';
                     $currentTokens = 0;
+                    $lastOverlap = '';
                 }
                 foreach ($this->hardSplit($segment, $this->hardMaxTokens) as $piece) {
                     $chunks[] = $this->makeChunk($piece);
@@ -82,15 +91,51 @@ final class Chunker
                 $overlap = $this->tail($current, $this->overlapTokens);
                 $current = $overlap;
                 $currentTokens = self::estimateTokens($overlap);
+                $lastOverlap = $overlap;
             }
             $current = $current === '' ? $segment : $current . "\n\n" . $segment;
             $currentTokens = self::estimateTokens($current);
         }
-        if (trim($current) !== '') {
+        if (trim($current) !== '' && !$this->mergeTrailingRemainder($chunks, $current, $lastOverlap)) {
             $chunks[] = $this->makeChunk($current);
         }
 
         return $chunks;
+    }
+
+    /**
+     * CHUNK_MIN_TOKENS: if the final remainder (without the overlap copied from
+     * the previous chunk) is smaller than the minimum, append it to the
+     * previous chunk instead of emitting a tiny chunk. Returns true when merged.
+     *
+     * @param list<array{text:string,token_count:int}> $chunks
+     */
+    private function mergeTrailingRemainder(array &$chunks, string $current, string $lastOverlap): bool
+    {
+        if ($this->minTokens <= 0 || $chunks === []) {
+            return false;
+        }
+        $remainder = $current;
+        if ($lastOverlap !== '' && str_starts_with($current, $lastOverlap)) {
+            $remainder = ltrim(substr($current, strlen($lastOverlap)));
+        }
+        $remainder = trim($remainder);
+        if ($remainder === '') {
+            // Nothing beyond the overlap: the text is already fully covered.
+            return true;
+        }
+        $remainderTokens = self::estimateTokens($remainder);
+        if ($remainderTokens >= $this->minTokens) {
+            return false;
+        }
+        $last = count($chunks) - 1;
+        $merged = $this->makeChunk($chunks[$last]['text'] . "\n\n" . $remainder);
+        if ($merged['token_count'] > $this->hardMaxTokens) {
+            return false;
+        }
+        $chunks[$last] = $merged;
+
+        return true;
     }
 
     /** @return list<string> */

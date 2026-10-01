@@ -49,8 +49,9 @@ wird von Docker Compose an die Container weitergereicht. Eine Vorlage liegt als
 | --- | --- | --- |
 | `EMBEDDING_HOST` | `embedding` | Dienstname |
 | `EMBEDDING_PORT` | `8000` | API-Port |
-| `EMBEDDING_MODELS` | `Qwen3-Embedding-0.6B` | Kommaseparierte Liste der beim Start geladenen Modelle |
-| `EMBEDDING_DEFAULT_MODEL` | `Qwen3-Embedding-0.6B` | Standardmodell |
+| `EMBEDDING_MODELS` | `Qwen3-Embedding-0.6B` | Kommaseparierte Liste der Modelle, die der Dienst **anbietet** (Katalog). Die Gewichte müssen vorab mit `docker compose --profile tools run --rm model-download` nach `embedding/models/` geladen werden; der laufende Dienst hat keinen Internetzugang |
+| `EMBEDDING_DEFAULT_MODEL` | `Qwen3-Embedding-0.6B` | Modell, das der Dienst **beim Start** lädt. Nur ein Modell ist gleichzeitig geladen; welches Modell *aktiv* ist, bestimmt die Datenbank (`embedding_models.active`, Ansicht **System**). Der Worker gleicht den Dienst beim Start und im Leerlauf daran an |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | – | Nur für den Download-Container `model-download` (Profil `tools`) |
 
 Verfügbare Modelle (aus `embedding/catalog.json`):
 
@@ -90,6 +91,8 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | --- | --- | --- |
 | `UPLOAD_MAX_SIZE` | `100M` | Maximale Größe je Upload-Datei (setzt auch PHP `upload_max_filesize`) |
 | `POST_MAX_SIZE` | `200M` | Maximale Request-Größe (PHP `post_max_size`; nginx `client_max_body_size` = 200m) |
+| `MAX_DOCUMENT_SIZE` | `100M` | Maximale Größe eines Quelldokuments bei der Discovery. Größere Dateien werden als Dokumentversion mit Status `FAILED` und Fehlermeldung registriert (ohne Blob, Eintrag in `processing_errors`, Schritt `discover`) und bleiben so im Auftrag sichtbar. Beim nächsten Auftrag wird die Größe erneut geprüft; nach einer Erhöhung des Limits wird die Datei nachträglich übernommen. Richtwert: Base64-Blob ≈ 1,34 × Dateigröße muss unter MariaDB `max_allowed_packet` (256M) und `PHP_MEMORY_LIMIT` bleiben. `0` deaktiviert die Prüfung |
+| `PHP_MEMORY_LIMIT` | `384M` | PHP `memory_limit` in `app` und `worker` (Container-`mem_limit` 512m) |
 | `IMPORT_MAX_ENTRIES` | `200000` | Maximale Anzahl Einträge in einem Import-Archiv |
 | `IMPORT_MAX_BYTES` | `10737418240` | Maximale entpackte Größe eines Import-Archivs (Bytes) |
 | `CONVERT_TIMEOUT` | `300` | Timeout der Konvertierung |
@@ -100,7 +103,7 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | --- | --- | --- |
 | `CHUNK_SIZE_TOKENS` | `512` | Zielgröße eines Chunks (Tokens) |
 | `CHUNK_OVERLAP_TOKENS` | `64` | Überlappung zwischen Chunks |
-| `CHUNK_MIN_TOKENS` | `50` | Mindestgröße eines Chunks |
+| `CHUNK_MIN_TOKENS` | `50` | Mindestgröße des letzten Chunks: ein kleinerer Rest wird an den vorherigen Chunk angehängt (sofern `CHUNK_MAX_TOKENS` eingehalten wird); `0` deaktiviert |
 | `CHUNK_MAX_TOKENS` | `1024` | Harte Obergrenze eines Chunks |
 | `EMBED_BATCH_SIZE` | `16` | Batch-Größe beim Embedding |
 
@@ -108,9 +111,29 @@ ${DATA_DIR}/exports  → /srv/data/exports
 
 | Variable | Standard | Beschreibung |
 | --- | --- | --- |
-| `WORKER_CONCURRENCY` | `2` | Gleichzeitig verarbeitete Dokumente |
-| `WORKER_BATCH_SIZE` | `16` | Batch-Größe beim Dokument-Abruf |
-| `WORKER_LOCK_TIMEOUT` | `1800` | Lock-Timeout in Sekunden (Crash Recovery) |
+| `WORKER_POLL_INTERVAL` | `2` | Wartezeit in Sekunden, wenn keine Arbeit ansteht |
+
+Der Worker verarbeitet genau **ein Dokument gleichzeitig**; es ist immer nur
+ein Worker aktiv (MySQL-Advisory-Lock, weitere Replikate warten als Standby).
+Die früher dokumentierten Variablen `WORKER_CONCURRENCY`, `WORKER_BATCH_SIZE`
+und `WORKER_LOCK_TIMEOUT` hatten keine Wirkung und wurden entfernt.
+
+### Metriken
+
+Der Worker schreibt Laufzeitmetriken nach `system_metrics` (sichtbar unter
+**System → System-Metriken** bzw. `GET /api/metrics`): `document_duration_seconds`
+je Dokument (mit Dokument-ID, Endung, Größe, Status, Chunks als `meta`) sowie
+`job_duration_seconds`, `job_documents_processed`, `job_documents_failed` und
+`job_chunks_total` je abgeschlossenem Auftrag. Einträge älter als 30 Tage
+werden beim Abschluss eines Auftrags gelöscht.
+
+### Einstellungen-Tabelle
+
+Die Tabelle `settings` (`GET/PUT /api/settings`, Ansicht **Einstellungen**) ist
+ein freier Schlüssel/Wert-Speicher und beeinflusst die Verarbeitung **nicht**.
+Chunking, Embedding und Worker werden ausschließlich über die hier
+beschriebenen Umgebungsvariablen konfiguriert; das aktive Modell liegt in
+`embedding_models.active`.
 
 ## Session / Sicherheit
 
@@ -119,6 +142,7 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | `SESSION_SECRET` | – | Geheimnis (min. 32 Zeichen) zur Verschlüsselung gespeicherter TLS-Schlüssel (**ändern!**, Platzhalter werden abgelehnt) |
 | `SESSION_IDLE_TIMEOUT` | `1800` | Sitzungs-Leerlauf-Timeout in Sekunden |
 | `SESSION_ABSOLUTE_TIMEOUT` | `43200` | Maximale Sitzungsdauer in Sekunden |
+| `SESSION_SAVE_PATH` | `/app/storage/sessions` | Ablageort der PHP-Sitzungsdateien im App-Container (normalerweise nicht ändern) |
 | `LOGIN_MAX_ATTEMPTS_USER` | `5` | Fehlversuche je Benutzer im Zeitfenster |
 | `LOGIN_MAX_ATTEMPTS_IP` | `20` | Fehlversuche je IP im Zeitfenster |
 | `LOGIN_THROTTLE_WINDOW` | `900` | Zeitfenster/Sperrdauer in Sekunden |
@@ -159,7 +183,13 @@ Dienste neu.
 
 ## Laufzeit-Einstellungen (Datenbank)
 
-Einige Einstellungen (z. B. aktives Embedding-Modell) werden nicht über `.env`,
-sondern über die Datenbank-Tabelle `settings` bzw. die Oberfläche (Ansicht
-„Einstellungen“) verwaltet. Siehe [ADMIN_GUIDE.md](ADMIN_GUIDE.md) und
-[DATABASE.md](DATABASE.md).
+Das **aktive Embedding-Modell** wird nicht über `.env`, sondern in der
+Datenbank verwaltet (`embedding_models.active`, Ansicht **System** →
+„Aktivieren“, `POST /api/models/activate`). Der Modellkatalog (Name,
+Dimension) wird beim Worker-Start und über `POST /api/models/sync` aus dem
+Embedding-Dienst übernommen.
+
+Die Tabelle `settings` (Ansicht **Einstellungen**) ist dagegen ein freier
+Schlüssel/Wert-Speicher ohne Einfluss auf die Verarbeitung (siehe
+[Worker → Einstellungen-Tabelle](#einstellungen-tabelle)). Siehe auch
+[ADMIN_GUIDE.md](ADMIN_GUIDE.md) und [DATABASE.md](DATABASE.md).

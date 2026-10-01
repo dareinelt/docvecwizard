@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Core\Base64;
 use App\Core\Config;
 use App\Core\Db;
 use App\Core\Logger;
@@ -41,6 +42,7 @@ final class ProcessingService
             'max_tokens' => Config::int('CHUNK_SIZE_TOKENS', 512),
             'overlap_tokens' => Config::int('CHUNK_OVERLAP_TOKENS', 64),
             'hard_max_tokens' => Config::int('CHUNK_MAX_TOKENS', 1024),
+            'min_tokens' => Config::int('CHUNK_MIN_TOKENS', 50),
             'batch_size' => Config::int('EMBED_BATCH_SIZE', 32),
         ];
     }
@@ -49,11 +51,16 @@ final class ProcessingService
      * Scan the job's source directory and register discovered files. Versions
      * are grouped by stable source path (a grouping hint only — identity is the
      * generated `document_id`/`document_version_id`), and identical content is
-     * deduplicated by SHA-256. Returns the number of newly created versions.
+     * deduplicated by SHA-256.
+     *
+     * Every skipped file is logged with its reason and the totals are written
+     * to `jobs.documents_skipped` / `jobs.documents_requeued` plus an audit
+     * entry, so a job that ends with "0 new documents" is explainable.
      *
      * @param array<string,mixed> $job
+     * @return array{scanned:int,new:int,new_versions:int,requeued:int,skipped_unchanged:int,skipped_duplicate:int,unreadable:int,oversized:int}
      */
-    public function discover(array $job): int
+    public function discover(array $job): array
     {
         $root = Config::string('INPUT_ROOT', '/srv/data/input');
         $source = $job['source_directory'];
@@ -63,41 +70,212 @@ final class ProcessingService
         }
         $recursive = (bool) $job['recursive'];
         $files = $this->scanFiles($absolute, $recursive);
-        $newCount = 0;
+        $stats = ['scanned' => count($files), 'new' => 0, 'new_versions' => 0, 'requeued' => 0, 'skipped_unchanged' => 0, 'skipped_duplicate' => 0, 'unreadable' => 0, 'oversized' => 0];
+        $log = Logger::channel('worker');
+        $previousJobs = [];
+        $limitLabel = Config::string('MAX_DOCUMENT_SIZE', self::DEFAULT_MAX_DOCUMENT_SIZE);
+        $maxBytes = UploadService::parseSize($limitLabel);
         foreach ($files as $file) {
             $relative = ltrim(substr($file, strlen($absolute)), '/');
-            $hash = hash_file('sha256', $file);
-            if ($hash === false) {
+            $hash = @hash_file('sha256', $file);
+            $size = @filesize($file);
+            if ($hash === false || $size === false) {
+                $stats['unreadable']++;
+                $log->warning('discovery: file not readable, skipped', ['job_id' => $job['job_id'], 'path' => $relative]);
                 continue;
             }
+            $oversize = self::oversizeMessage($size, $maxBytes, $limitLabel);
 
-            // 1. Same source path, same content -> unchanged.
             $current = Db::fetchOne(
-                'SELECT id, document_id, file_hash FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
+                'SELECT id, document_id, document_version_id, job_id, file_hash, processing_status, blob_id, source_path FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
                 [$file]
             );
-            if ($current !== null && $current['file_hash'] === $hash) {
+            $duplicate = $current === null
+                ? Db::fetchOne('SELECT document_id, source_path FROM documents WHERE file_hash = ? LIMIT 1', [$hash])
+                : null;
+
+            $decision = self::discoveryDecision($current, $hash, $duplicate !== null);
+            if ($oversize !== null && $decision !== self::DECISION_SKIP_UNCHANGED && $decision !== self::DECISION_SKIP_DUPLICATE) {
+                // Too large: register (or take over) the version as FAILED so the
+                // file shows up in the job with a clear error instead of being
+                // silently dropped. No blob is stored.
+                if ($decision === self::DECISION_REQUEUE) {
+                    $this->failOversized($job, $current, $oversize);
+                    $previousJobs[(int) $current['job_id']] = true;
+                } elseif ($decision === self::DECISION_NEW_VERSION) {
+                    $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id'], $oversize);
+                } else {
+                    $this->insertDiscovered($job, $file, $relative, $hash, $oversize);
+                }
+                $stats['oversized']++;
+                $log->warning('discovery: file exceeds MAX_DOCUMENT_SIZE, marked FAILED', ['job_id' => $job['job_id'], 'path' => $relative, 'size' => $size, 'limit' => $limitLabel]);
                 continue;
             }
 
-            // 2. Same source path, different content -> new version.
-            if ($current !== null) {
-                $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
-                $newCount++;
-                continue;
+            switch ($decision) {
+                case self::DECISION_NEW_VERSION:
+                    // Same source path, different content -> new version.
+                    $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
+                    $stats['new_versions']++;
+                    break;
+                case self::DECISION_REQUEUE:
+                    // Same content, but the last attempt failed or was left over by a
+                    // cancelled job: hand the current version to this job instead of
+                    // silently skipping it forever.
+                    $this->requeue($job, $current);
+                    $previousJobs[(int) $current['job_id']] = true;
+                    $stats['requeued']++;
+                    $log->info('discovery: requeued document', ['job_id' => $job['job_id'], 'path' => $relative, 'previous_status' => $current['processing_status']]);
+                    break;
+                case self::DECISION_NEW:
+                    $this->insertDiscovered($job, $file, $relative, $hash);
+                    $stats['new']++;
+                    break;
+                case self::DECISION_SKIP_DUPLICATE:
+                    $stats['skipped_duplicate']++;
+                    $log->info('discovery: skipped, identical content already stored', [
+                        'job_id' => $job['job_id'],
+                        'path' => $relative,
+                        'existing_document_id' => $duplicate['document_id'] ?? null,
+                        'existing_source_path' => $duplicate['source_path'] ?? null,
+                    ]);
+                    break;
+                default:
+                    $stats['skipped_unchanged']++;
+                    $log->debug('discovery: skipped, unchanged', ['job_id' => $job['job_id'], 'path' => $relative, 'status' => $current['processing_status'] ?? null]);
+                    break;
             }
-
-            // 3. No document at this path yet -> global content dedupe.
-            $dup = Db::fetchOne('SELECT id FROM documents WHERE file_hash = ? LIMIT 1', [$hash]);
-            if ($dup !== null) {
-                continue;
-            }
-
-            $this->insertDiscovered($job, $file, $relative, $hash);
-            $newCount++;
         }
 
-        return $newCount;
+        Db::execute(
+            'UPDATE jobs SET documents_skipped = ?, documents_requeued = ? WHERE id = ?',
+            [$stats['skipped_unchanged'] + $stats['skipped_duplicate'] + $stats['unreadable'], $stats['requeued'], (int) $job['id']]
+        );
+        Audit::record('job.discover', 'job', (string) $job['job_id'], $stats);
+
+        // The requeued documents now count towards this job; keep the
+        // counters of the jobs they came from consistent.
+        $jobService = new JobService();
+        foreach (array_keys($previousJobs) as $previousJobId) {
+            if ($previousJobId !== (int) $job['id']) {
+                $jobService->refreshCounters($previousJobId);
+            }
+        }
+
+        return $stats;
+    }
+
+    public const DECISION_SKIP_UNCHANGED = 'skip_unchanged';
+    public const DECISION_SKIP_DUPLICATE = 'skip_duplicate';
+    public const DECISION_REQUEUE = 'requeue';
+    public const DECISION_NEW_VERSION = 'new_version';
+    public const DECISION_NEW = 'new';
+
+    /** Statuses of a current version that are picked up again by the next discovery of the same content. */
+    private const REQUEUE_STATUSES = ['FAILED', 'PENDING'];
+
+    /**
+     * Pure decision rule of discovery for one file.
+     *
+     * @param array{file_hash:string,processing_status:string}|null $current current version at the same source path, if any
+     * @param bool $hashExistsElsewhere identical content already stored under another path (only relevant when $current is null)
+     */
+    public static function discoveryDecision(?array $current, string $hash, bool $hashExistsElsewhere): string
+    {
+        if ($current === null) {
+            return $hashExistsElsewhere ? self::DECISION_SKIP_DUPLICATE : self::DECISION_NEW;
+        }
+        if ((string) $current['file_hash'] !== $hash) {
+            return self::DECISION_NEW_VERSION;
+        }
+        if (in_array((string) ($current['processing_status'] ?? ''), self::REQUEUE_STATUSES, true)) {
+            return self::DECISION_REQUEUE;
+        }
+
+        return self::DECISION_SKIP_UNCHANGED;
+    }
+
+    public const DEFAULT_MAX_DOCUMENT_SIZE = '100M';
+
+    /**
+     * Pure size rule for MAX_DOCUMENT_SIZE. Returns null when the file may be
+     * processed, otherwise the user-facing (German) error message stored on
+     * the document. A limit <= 0 disables the check.
+     */
+    public static function oversizeMessage(int $size, int $maxBytes, string $limitLabel): ?string
+    {
+        if ($maxBytes <= 0 || $size <= $maxBytes) {
+            return null;
+        }
+
+        return sprintf(
+            'Datei ist zu groß (%s, Limit MAX_DOCUMENT_SIZE=%s). Die Datei wurde nicht übernommen; Limit erhöhen und den Auftrag erneut starten.',
+            self::formatBytes($size),
+            $limitLabel
+        );
+    }
+
+    public static function formatBytes(int $bytes): string
+    {
+        if ($bytes >= 1024 ** 3) {
+            return sprintf('%.1f GB', $bytes / 1024 ** 3);
+        }
+        if ($bytes >= 1024 ** 2) {
+            return sprintf('%.1f MB', $bytes / 1024 ** 2);
+        }
+        if ($bytes >= 1024) {
+            return sprintf('%.0f KB', $bytes / 1024);
+        }
+
+        return $bytes . ' B';
+    }
+
+    /**
+     * Mark the (unchanged, still oversized) current version as FAILED under
+     * the new job so the failure is visible there.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $current
+     */
+    private function failOversized(array $job, array $current, string $message): void
+    {
+        Db::transaction(function () use ($job, $current, $message): void {
+            Db::execute(
+                'UPDATE documents SET processing_status = "FAILED", job_id = ?, error_message = ? WHERE id = ?',
+                [$job['id'], $message, (int) $current['id']]
+            );
+            Db::execute(
+                'INSERT INTO processing_errors (job_id, document_id, step, error_message) VALUES (?, ?, ?, ?)',
+                [$job['id'], (int) $current['id'], 'discover', $message]
+            );
+        });
+    }
+
+    /**
+     * Attach an existing (failed / orphaned) current version to a job so the
+     * worker processes it again. Partial chunks and vectors of the previous
+     * attempt are removed by processDocument() (idempotency cleanup). A
+     * version that was registered without blob (oversized at the time) gets
+     * its blob stored now.
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $current needs id, blob_id, document_id, document_version_id, source_path, file_hash
+     */
+    public function requeue(array $job, array $current): void
+    {
+        Db::transaction(function () use ($job, $current): void {
+            Db::execute(
+                'UPDATE documents SET processing_status = "DISCOVERED", job_id = ?, embedding_model = ?, embedding_dimension = ?, error_message = NULL WHERE id = ?',
+                [$job['id'], $job['embedding_model'], (int) $job['embedding_dimension'], (int) $current['id']]
+            );
+            if (!array_key_exists('blob_id', $current) || $current['blob_id'] !== null) {
+                return;
+            }
+            $path = (string) $current['source_path'];
+            $size = (int) (@filesize($path) ?: 0);
+            $blobId = $this->storeBlob((string) $current['document_id'], (string) $current['document_version_id'], $path, (string) $current['file_hash'], $size);
+            Db::execute('UPDATE documents SET blob_id = ?, file_size = ? WHERE id = ?', [$blobId, $size, (int) $current['id']]);
+        });
     }
 
     /** @return list<string> */
@@ -136,30 +314,33 @@ final class ProcessingService
     }
 
     /** @param array<string,mixed> $job */
-    private function insertDiscovered(array $job, string $absolute, string $relative, string $hash): void
+    private function insertDiscovered(array $job, string $absolute, string $relative, string $hash, ?string $failure = null): void
     {
         $documentId = Uuid::v4();
-        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, $documentId, 1);
+        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, $documentId, 1, false, $failure);
     }
 
     /** @param array<string,mixed> $job */
-    private function insertVersion(array $job, string $absolute, string $relative, string $hash, string $documentId): void
+    private function insertVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, ?string $failure = null): void
     {
         $current = Db::fetchOne('SELECT version FROM documents WHERE document_id = ? ORDER BY version DESC LIMIT 1', [$documentId]);
         $version = ((int) ($current['version'] ?? 0)) + 1;
 
-        // Retire the current version so it never points at the new vectors.
-        Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ? AND is_current = 1', [$documentId]);
-
-        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, Uuid::v4(), $version);
+        // Retiring the previous version happens inside the same transaction as
+        // the insert (see insertDocumentVersion), so a failed blob store can
+        // never leave a document without any current version.
+        $this->insertDocumentVersion($job, $absolute, $relative, $hash, $documentId, Uuid::v4(), $version, true, $failure);
     }
 
     /**
-     * Insert one document version plus its original-file blob atomically.
+     * Insert one document version plus its original-file blob atomically. With
+     * $retirePrevious the hitherto current version of the same document is set
+     * to `is_current = 0` in the same transaction. With $failure the version is
+     * registered as FAILED (discovery step) without blob.
      *
      * @param array<string,mixed> $job
      */
-    private function insertDocumentVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, string $documentVersionId, int $version): void
+    private function insertDocumentVersion(array $job, string $absolute, string $relative, string $hash, string $documentId, string $documentVersionId, int $version, bool $retirePrevious = false, ?string $failure = null): void
     {
         $stat = stat($absolute);
         $isStat = is_array($stat);
@@ -168,10 +349,13 @@ final class ProcessingService
         $mtime = $isStat && isset($stat['mtime']) ? gmdate('Y-m-d H:i:s', $stat['mtime']) : null;
         $ext = strtolower(pathinfo($absolute, PATHINFO_EXTENSION));
 
-        Db::transaction(function () use ($job, $absolute, $relative, $hash, $documentId, $documentVersionId, $version, $size, $ctime, $mtime, $ext): void {
+        Db::transaction(function () use ($job, $absolute, $relative, $hash, $documentId, $documentVersionId, $version, $size, $ctime, $mtime, $ext, $retirePrevious, $failure): void {
+            if ($retirePrevious) {
+                Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ? AND is_current = 1', [$documentId]);
+            }
             Db::execute(
-                'INSERT INTO documents (document_id, document_version_id, version, is_current, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, created_at, modified_at, processing_status, embedding_model, embedding_dimension)
-                 VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "DISCOVERED", ?, ?)',
+                'INSERT INTO documents (document_id, document_version_id, version, is_current, job_id, source_path, relative_path, filename, extension, mime_type, file_size, file_hash, created_at, modified_at, processing_status, error_message, embedding_model, embedding_dimension)
+                 VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [
                     $documentId,
                     $documentVersionId,
@@ -186,24 +370,37 @@ final class ProcessingService
                     $hash,
                     $ctime,
                     $mtime,
+                    $failure === null ? 'DISCOVERED' : 'FAILED',
+                    $failure,
                     $job['embedding_model'],
                     (int) $job['embedding_dimension'],
                 ]
             );
             $id = Db::insertId();
+            if ($failure !== null) {
+                Db::execute(
+                    'INSERT INTO processing_errors (job_id, document_id, step, error_message) VALUES (?, ?, ?, ?)',
+                    [$job['id'], $id, 'discover', $failure]
+                );
+
+                return;
+            }
             $blobId = $this->storeBlob($documentId, $documentVersionId, $absolute, $hash, $size);
             Db::execute('UPDATE documents SET blob_id = ? WHERE id = ?', [$blobId, $id]);
         });
     }
 
-    /** Store the original file byte-for-byte as Base64; returns the blob id. */
+    /**
+     * Store the original file byte-for-byte as Base64; returns the blob id.
+     * Encoding is chunked so the raw bytes are never held in memory next to
+     * the encoded payload (peak ≈ 1.34 × file size).
+     */
     private function storeBlob(string $documentId, string $documentVersionId, string $absolute, string $hash, int $size): int
     {
-        $bytes = file_get_contents($absolute);
-        if ($bytes === false) {
+        $base64 = Base64::encodeFile($absolute);
+        if ($base64 === null) {
             throw new \RuntimeException('Cannot read source file for blob storage: ' . $absolute);
         }
-        $base64 = base64_encode($bytes);
         $ext = strtolower(pathinfo($absolute, PATHINFO_EXTENSION));
         Db::execute(
             'INSERT INTO document_blobs (document_id, document_version_id, encoding, mime_type, original_filename, file_size, sha256, base64_data)
@@ -213,7 +410,7 @@ final class ProcessingService
                 $documentVersionId,
                 $this->guessMime($ext),
                 basename($absolute),
-                $size > 0 ? $size : strlen($bytes),
+                $size > 0 ? $size : (int) (@filesize($absolute) ?: 0),
                 $hash,
                 $base64,
             ]
@@ -265,7 +462,8 @@ final class ProcessingService
             $chunks = $this->chunkByPage($text, $pageCount, $doc['extension'] === 'pdf');
 
             $collection = MilvusClient::collectionFor((string) $doc['embedding_model']);
-            $dimension = (int) $doc['embedding_dimension'];
+            $model = (string) $doc['embedding_model'];
+            $dimension = $this->expectedDimension($model, (int) $doc['embedding_dimension']);
             $this->ensureCollection($collection, $dimension, 'cosine');
 
             // FIX (idempotency): a document left in PROCESSING by a crashed or
@@ -288,7 +486,7 @@ final class ProcessingService
             $storedChunks = 0;
             foreach (array_chunk($chunks, $batchSize) as $batch) {
                 $texts = array_map(static fn (array $c): string => $c['text'], $batch);
-                $embeddings = $this->embedding->embedBatch($texts);
+                $embeddings = $this->embedWithModel($texts, $model, $dimension);
                 foreach ($batch as $i => $chunk) {
                     $vector = $this->findEmbedding($embeddings, $i);
                     if ($vector === null) {
@@ -361,6 +559,60 @@ final class ProcessingService
     }
 
     /**
+     * Authoritative vector dimension for a model: `embedding_models.dimension`
+     * (synced from the service catalog). The value stored on the document/job at
+     * creation time must agree, otherwise the Milvus collection would not fit.
+     */
+    private function expectedDimension(string $model, int $documentDimension): int
+    {
+        $row = (new ModelService())->findByName($model);
+        $catalogDimension = $row !== null ? (int) $row['dimension'] : 0;
+        if ($catalogDimension <= 0) {
+            if ($documentDimension <= 0) {
+                throw new \RuntimeException(sprintf('Für das Embedding-Modell "%s" ist keine Vektordimension bekannt.', $model));
+            }
+
+            return $documentDimension;
+        }
+        if ($documentDimension > 0 && $documentDimension !== $catalogDimension) {
+            throw new \RuntimeException(sprintf(
+                'Dimension des Auftrags (%d) weicht von der Dimension des Modells "%s" (%d) ab.',
+                $documentDimension,
+                $model,
+                $catalogDimension
+            ));
+        }
+
+        return $catalogDimension;
+    }
+
+    /**
+     * Embed a batch with the job's model. If the embedding service has a
+     * different model loaded (e.g. after a container restart it loaded
+     * EMBEDDING_DEFAULT_MODEL), load the expected model and retry once. The
+     * returned vectors are dimension-checked before they reach Milvus.
+     *
+     * @param list<string> $texts
+     * @return list<list<float>>
+     */
+    private function embedWithModel(array $texts, string $model, int $dimension): array
+    {
+        try {
+            $vectors = $this->embedding->embedBatch($texts, $model);
+        } catch (ModelMismatchException $e) {
+            Logger::channel('worker')->warning('embedding service has another model loaded; activating job model', [
+                'expected' => $e->expected,
+                'loaded' => $e->loaded,
+            ]);
+            $this->embedding->activate($model);
+            $vectors = $this->embedding->embedBatch($texts, $model);
+        }
+        EmbeddingClient::assertDimension($vectors, $dimension, $model);
+
+        return $vectors;
+    }
+
+    /**
      * Chunk text, honouring PDF page boundaries when form-feed markers exist.
      *
      * @return list<array{text:string,token_count:int,chunk_index:int,page_start:int,page_end:int}>
@@ -368,8 +620,20 @@ final class ProcessingService
     private function chunkByPage(string $text, int $pageCount, bool $isPdf): array
     {
         $config = $this->chunkerConfig();
-        $chunker = new Chunker($config['max_tokens'], $config['overlap_tokens'], $config['hard_max_tokens']);
+        $chunker = new Chunker($config['max_tokens'], $config['overlap_tokens'], $config['hard_max_tokens'], $config['min_tokens']);
 
+        return self::chunkPages($chunker, $text, $pageCount, $isPdf);
+    }
+
+    /**
+     * Pure page-aware chunking: PDF text with form-feed page markers is chunked
+     * per page (chunks never span pages, empty pages yield nothing); any other
+     * text is chunked as a whole and attributed to page max(1, $pageCount).
+     *
+     * @return list<array{text:string,token_count:int,chunk_index:int,page_start:int,page_end:int}>
+     */
+    public static function chunkPages(Chunker $chunker, string $text, int $pageCount, bool $isPdf): array
+    {
         $chunks = [];
         $index = 0;
         if ($isPdf && str_contains($text, "\f")) {

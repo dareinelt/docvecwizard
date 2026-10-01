@@ -11,7 +11,6 @@ enum JobStatus: string
     case Completed = 'COMPLETED';
     case Failed = 'FAILED';
     case Cancelled = 'CANCELLED';
-    case Paused = 'PAUSED';
 
     public function isTerminal(): bool
     {
@@ -19,5 +18,11 @@ enum JobStatus: string
             self::Completed, self::Failed, self::Cancelled => true,
             default => false,
         };
+    }
+
+    /** Only cancelled jobs can be taken up again; COMPLETED/FAILED are final. */
+    public function isResumable(): bool
+    {
+        return $this === self::Cancelled;
     }
 }
