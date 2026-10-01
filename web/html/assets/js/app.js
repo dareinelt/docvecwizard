@@ -471,6 +471,7 @@
         </div>
         <div class="flex mb">
           ${s.source_available ? `<a class="btn btn-primary" href="/api/documents/${enc(d.document_id)}/download">Original herunterladen</a>` : '<span class="muted">Original nicht verfügbar</span>'}
+          ${String(d.processing_status).toUpperCase() === 'FAILED' ? '<button class="btn" type="button" id="doc-retry">Erneut verarbeiten</button>' : ''}
         </div>
         <dl class="kv">
           <dt>Dokument-ID</dt><dd class="mono">${esc(d.document_id)}</dd>
@@ -534,6 +535,17 @@
 
     $('#modal-title').textContent = 'Dokument: ' + (d.filename || '');
     $('#modal-body').innerHTML = html;
+    const retry = $('#doc-retry');
+    if (retry) retry.addEventListener('click', async () => {
+      await busy(retry, async () => {
+        try {
+          await api('/api/documents/' + enc(d.document_id) + '/retry', { method: 'POST' });
+          notify('Dokument wird erneut verarbeitet (neuer Auftrag angelegt).', 'success');
+          closeModal();
+          navigate('jobs', true);
+        } catch (e) { notify(e.message, 'error'); }
+      });
+    });
     const tabButtons = $$('#doc-tabs .tab');
     const select = t => {
       tabButtons.forEach(x => {

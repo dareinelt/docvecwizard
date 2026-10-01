@@ -64,6 +64,7 @@ final class ProcessingService
         $recursive = (bool) $job['recursive'];
         $files = $this->scanFiles($absolute, $recursive);
         $newCount = 0;
+        $previousJobs = [];
         foreach ($files as $file) {
             $relative = ltrim(substr($file, strlen($absolute)), '/');
             $hash = hash_file('sha256', $file);
@@ -71,33 +72,93 @@ final class ProcessingService
                 continue;
             }
 
-            // 1. Same source path, same content -> unchanged.
             $current = Db::fetchOne(
-                'SELECT id, document_id, file_hash FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
+                'SELECT id, document_id, job_id, file_hash, processing_status FROM documents WHERE source_path = ? AND is_current = 1 ORDER BY version DESC LIMIT 1',
                 [$file]
             );
-            if ($current !== null && $current['file_hash'] === $hash) {
-                continue;
-            }
+            $hashElsewhere = $current === null
+                && Db::fetchOne('SELECT id FROM documents WHERE file_hash = ? LIMIT 1', [$hash]) !== null;
 
-            // 2. Same source path, different content -> new version.
-            if ($current !== null) {
-                $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
-                $newCount++;
-                continue;
+            switch (self::discoveryDecision($current, $hash, $hashElsewhere)) {
+                case self::DECISION_NEW_VERSION:
+                    // Same source path, different content -> new version.
+                    $this->insertVersion($job, $file, $relative, $hash, (string) $current['document_id']);
+                    $newCount++;
+                    break;
+                case self::DECISION_REQUEUE:
+                    // Same content, but the last attempt failed or was left over by a
+                    // cancelled job: hand the current version to this job instead of
+                    // silently skipping it forever.
+                    $this->requeue($job, $current);
+                    $previousJobs[(int) $current['job_id']] = true;
+                    $newCount++;
+                    break;
+                case self::DECISION_NEW:
+                    $this->insertDiscovered($job, $file, $relative, $hash);
+                    $newCount++;
+                    break;
+                default:
+                    // skip_unchanged / skip_duplicate
+                    break;
             }
+        }
 
-            // 3. No document at this path yet -> global content dedupe.
-            $dup = Db::fetchOne('SELECT id FROM documents WHERE file_hash = ? LIMIT 1', [$hash]);
-            if ($dup !== null) {
-                continue;
+        // The requeued documents now count towards this job; keep the
+        // counters of the jobs they came from consistent.
+        $jobService = new JobService();
+        foreach (array_keys($previousJobs) as $previousJobId) {
+            if ($previousJobId !== (int) $job['id']) {
+                $jobService->refreshCounters($previousJobId);
             }
-
-            $this->insertDiscovered($job, $file, $relative, $hash);
-            $newCount++;
         }
 
         return $newCount;
+    }
+
+    public const DECISION_SKIP_UNCHANGED = 'skip_unchanged';
+    public const DECISION_SKIP_DUPLICATE = 'skip_duplicate';
+    public const DECISION_REQUEUE = 'requeue';
+    public const DECISION_NEW_VERSION = 'new_version';
+    public const DECISION_NEW = 'new';
+
+    /** Statuses of a current version that are picked up again by the next discovery of the same content. */
+    private const REQUEUE_STATUSES = ['FAILED', 'PENDING'];
+
+    /**
+     * Pure decision rule of discovery for one file.
+     *
+     * @param array{file_hash:string,processing_status:string}|null $current current version at the same source path, if any
+     * @param bool $hashExistsElsewhere identical content already stored under another path (only relevant when $current is null)
+     */
+    public static function discoveryDecision(?array $current, string $hash, bool $hashExistsElsewhere): string
+    {
+        if ($current === null) {
+            return $hashExistsElsewhere ? self::DECISION_SKIP_DUPLICATE : self::DECISION_NEW;
+        }
+        if ((string) $current['file_hash'] !== $hash) {
+            return self::DECISION_NEW_VERSION;
+        }
+        if (in_array((string) ($current['processing_status'] ?? ''), self::REQUEUE_STATUSES, true)) {
+            return self::DECISION_REQUEUE;
+        }
+
+        return self::DECISION_SKIP_UNCHANGED;
+    }
+
+    /**
+     * Attach an existing (failed / orphaned) current version to a job so the
+     * worker processes it again. Partial chunks and vectors of the previous
+     * attempt are removed by processDocument() (idempotency cleanup).
+     *
+     * @param array<string,mixed> $job
+     * @param array<string,mixed> $current
+     */
+    public function requeue(array $job, array $current): void
+    {
+        Db::execute(
+            'UPDATE documents SET processing_status = "DISCOVERED", job_id = ?, embedding_model = ?, embedding_dimension = ?, error_message = NULL WHERE id = ?',
+            [$job['id'], $job['embedding_model'], (int) $job['embedding_dimension'], (int) $current['id']]
+        );
     }
 
     /** @return list<string> */

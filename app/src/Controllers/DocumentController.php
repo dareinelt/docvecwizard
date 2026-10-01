@@ -8,6 +8,7 @@ use App\Http\HttpException;
 use App\Http\Request;
 use App\Http\Response;
 use App\Services\DocumentService;
+use App\Services\JobService;
 
 /** Documents, versions, chunks, vectors and source references. */
 final class DocumentController extends Controller
@@ -51,6 +52,19 @@ final class DocumentController extends Controller
         }
 
         return Response::json(['deleted' => true]);
+    }
+
+    /**
+     * Re-process a FAILED document (creates a running one-document job).
+     *
+     * @param array<string,string> $params
+     */
+    public function retry(Request $request, array $params): Response
+    {
+        $doc = $this->current($params);
+        $job = (new JobService())->retryDocument($doc);
+
+        return Response::json(['job' => $job, 'document_id' => (string) $doc['document_id']], 202);
     }
 
     /** @param array<string,string> $params */

@@ -65,6 +65,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/documents` | Dokumente auflisten (`?limit=`, `?search=`) |
 | GET | `/api/documents/{id}` | Dokument-Details (inkl. Chunks, Versionen, Quelle) |
 | DELETE | `/api/documents/{id}` | Dokument löschen |
+| POST | `/api/documents/{id}/retry` | Fehlgeschlagene aktuelle Version erneut verarbeiten (legt einen laufenden Ein-Dokument-Auftrag an; 202, 400 wenn nicht `FAILED` oder Quelldatei fehlt) |
 | GET | `/api/documents/{id}/source` | Quell-Metadaten des Originals |
 | GET | `/api/documents/{id}/versions` | Alle Versionen des Dokuments |
 | GET | `/api/documents/{id}/chunks` | Chunks der aktuellen Version |

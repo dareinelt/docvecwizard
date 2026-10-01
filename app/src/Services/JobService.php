@@ -68,6 +68,63 @@ final class JobService
         return $this->getByUuid($jobId) ?? ['job_id' => $jobId];
     }
 
+    /**
+     * Re-process a single FAILED document version. Creates a small job that
+     * starts directly in RUNNING (no discovery pass) and attaches the current
+     * version to it; the worker then picks it up like any discovered document.
+     *
+     * @param array<string,mixed> $doc current version row from `documents`
+     * @return array<string,mixed> the new job
+     * @throws \InvalidArgumentException with a user-facing (German) message
+     */
+    public function retryDocument(array $doc): array
+    {
+        if ((int) ($doc['is_current'] ?? 0) !== 1 || (string) $doc['processing_status'] !== 'FAILED') {
+            throw new \InvalidArgumentException('Nur fehlgeschlagene aktuelle Dokumentversionen können erneut verarbeitet werden.');
+        }
+        $sourcePath = (string) $doc['source_path'];
+        if (!is_file($sourcePath)) {
+            throw new \InvalidArgumentException('Die Quelldatei existiert nicht mehr: ' . basename($sourcePath));
+        }
+        $modelService = new ModelService();
+        $model = $modelService->findByName((string) $doc['embedding_model']) ?? $modelService->active();
+        if ($model === null) {
+            throw new \InvalidArgumentException('Kein Embedding-Modell verfügbar.');
+        }
+
+        $root = rtrim(Config::string('INPUT_ROOT', '/srv/data/input'), '/');
+        $dir = dirname($sourcePath);
+        $source = str_starts_with($dir, $root . '/') ? substr($dir, strlen($root) + 1) : ($dir === $root ? '' : $dir);
+
+        $jobId = Uuid::v4();
+        $now = gmdate('Y-m-d H:i:s');
+        Db::execute(
+            'INSERT INTO jobs (job_id, name, source_directory, `recursive`, embedding_model, embedding_dimension, status, started_at)
+             VALUES (?, ?, ?, 0, ?, ?, ?, ?)',
+            [
+                $jobId,
+                mb_substr('Erneut: ' . (string) $doc['filename'], 0, 255),
+                $source,
+                $model['name'],
+                (int) $model['dimension'],
+                self::STATUS_RUNNING,
+                $now,
+            ]
+        );
+        $job = $this->getByUuid($jobId);
+        if ($job === null) {
+            throw new \RuntimeException('Auftrag konnte nicht angelegt werden.');
+        }
+        (new ProcessingService())->requeue($job, $doc);
+        $this->refreshCounters((int) $job['id']);
+        if ((int) $doc['job_id'] !== (int) $job['id']) {
+            $this->refreshCounters((int) $doc['job_id']);
+        }
+        Audit::record('document.retry', 'document', (string) $doc['document_id'], ['job_id' => $jobId]);
+
+        return $this->getByUuid($jobId) ?? $job;
+    }
+
     /** @return list<array<string,mixed>> */
     public function list(int $limit = 100, int $offset = 0): array
     {
