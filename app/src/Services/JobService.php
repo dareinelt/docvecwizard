@@ -4,43 +4,66 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Core\Config;
 use App\Core\Db;
 use App\Core\Uuid;
+use App\Domain\JobStatus;
+use App\Security\PathGuard;
 
 final class JobService
 {
-    public const STATUS_CREATED = 'CREATED';
-    public const STATUS_RUNNING = 'RUNNING';
-    public const STATUS_COMPLETED = 'COMPLETED';
-    public const STATUS_FAILED = 'FAILED';
-    public const STATUS_CANCELLED = 'CANCELLED';
-    public const STATUS_PAUSED = 'PAUSED';
+    public const STATUS_CREATED = JobStatus::Created->value;
+    public const STATUS_RUNNING = JobStatus::Running->value;
+    public const STATUS_COMPLETED = JobStatus::Completed->value;
+    public const STATUS_FAILED = JobStatus::Failed->value;
+    public const STATUS_CANCELLED = JobStatus::Cancelled->value;
+    public const STATUS_PAUSED = JobStatus::Paused->value;
 
     /**
      * @param array{name:string,source_directory:string,recursive:bool,embedding_model:string} $input
      * @return array<string,mixed>
+     * @throws \InvalidArgumentException on invalid input (message is user-facing)
      */
     public function create(array $input): array
     {
+        if (trim($input['embedding_model']) === '') {
+            throw new \InvalidArgumentException('Bitte ein Embedding-Modell wählen.');
+        }
         $modelService = new ModelService();
         $model = $modelService->findByName($input['embedding_model']);
         if ($model === null) {
             throw new \InvalidArgumentException('Unknown embedding model: ' . $input['embedding_model']);
         }
+
+        // Validate the source directory up front. Previously any string was
+        // accepted and the job only failed later inside the worker.
+        $source = PathGuard::normalise($input['source_directory']);
+        $absolute = PathGuard::resolve(Config::string('INPUT_ROOT', '/srv/data/input'), $source);
+        if (!is_dir($absolute)) {
+            throw new \InvalidArgumentException('Quellordner existiert nicht: ' . ($source === '' ? '/' : $source));
+        }
+
+        $name = trim(preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $input['name']) ?? '');
+        if ($name === '') {
+            $name = 'Import ' . gmdate('Y-m-d H:i');
+        }
+        $name = mb_substr($name, 0, 255);
+
         $jobId = Uuid::v4();
         Db::execute(
             'INSERT INTO jobs (job_id, name, source_directory, `recursive`, embedding_model, embedding_dimension, status)
              VALUES (?, ?, ?, ?, ?, ?, ?)',
             [
                 $jobId,
-                $input['name'],
-                $input['source_directory'],
+                $name,
+                $source,
                 $input['recursive'] ? 1 : 0,
                 $model['name'],
                 (int) $model['dimension'],
                 self::STATUS_CREATED,
             ]
         );
+        Audit::record('job.create', 'job', $jobId, ['source_directory' => $source]);
 
         return $this->getByUuid($jobId) ?? ['job_id' => $jobId];
     }
@@ -69,9 +92,10 @@ final class JobService
     public function setStatus(int $id, string $status): void
     {
         $now = gmdate('Y-m-d H:i:s');
-        if ($status === self::STATUS_RUNNING) {
+        $enum = JobStatus::from($status);
+        if ($enum === JobStatus::Running) {
             Db::execute('UPDATE jobs SET status = ?, started_at = COALESCE(started_at, ?) WHERE id = ?', [$status, $now, $id]);
-        } elseif ($status === self::STATUS_COMPLETED || $status === self::STATUS_FAILED || $status === self::STATUS_CANCELLED) {
+        } elseif ($enum->isTerminal()) {
             Db::execute('UPDATE jobs SET status = ?, finished_at = ? WHERE id = ?', [$status, $now, $id]);
         } else {
             Db::execute('UPDATE jobs SET status = ? WHERE id = ?', [$status, $id]);
@@ -85,10 +109,11 @@ final class JobService
         if ($job === null) {
             throw new \InvalidArgumentException('Job not found');
         }
-        if (in_array($job['status'], [self::STATUS_COMPLETED, self::STATUS_FAILED, self::STATUS_CANCELLED], true)) {
+        if ((JobStatus::tryFrom((string) $job['status']) ?? JobStatus::Created)->isTerminal()) {
             return;
         }
         $this->setStatus($id, self::STATUS_CANCELLED);
+        Audit::record('job.cancel', 'job', (string) $job['job_id']);
     }
 
     /** Recompute aggregate counters for a job. */

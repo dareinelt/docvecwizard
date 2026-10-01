@@ -285,7 +285,7 @@ final class MilvusClient
     private function assertOk(array $response): array
     {
         if (isset($response['code']) && (int) $response['code'] !== 0) {
-            throw new \RuntimeException(sprintf(
+            throw new \App\Http\UpstreamException(sprintf(
                 'Milvus error %s: %s',
                 (string) $response['code'],
                 (string) ($response['message'] ?? 'unknown error')

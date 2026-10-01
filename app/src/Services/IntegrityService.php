@@ -139,22 +139,40 @@ final class IntegrityService
     /** @param list<array<string,mixed>> $issues */
     private function hashErrors(array &$issues): int
     {
-        $rows = Db::fetchAll(
-            'SELECT b.document_version_id, b.sha256, b.base64_data FROM document_blobs b'
-        );
         $errors = 0;
-        // Hash verification streams in batches to bound peak memory.
-        foreach ($rows as $row) {
-            $data = $row['base64_data'];
-            if (!is_string($data)) {
-                $errors++;
-                $issues[] = ['type' => 'hash_error', 'document_version_id' => $row['document_version_id'], 'detail' => 'Blob has no Base64 payload'];
-                continue;
+        // FIX: previously all Base64 payloads were fetched in a single query
+        // (despite the comment claiming batching), which exhausted the 512 MB
+        // memory limit on larger installations. Now: keyset pagination over
+        // the primary key, one payload in memory at a time.
+        $lastId = 0;
+        while (true) {
+            $ids = Db::fetchAll(
+                'SELECT blob_id FROM document_blobs WHERE blob_id > ? ORDER BY blob_id ASC LIMIT 500',
+                [$lastId]
+            );
+            if ($ids === []) {
+                break;
             }
-            $ok = Base64::verifySha256($data, (string) $row['sha256']);
-            if (!$ok) {
-                $errors++;
-                $issues[] = ['type' => 'hash_error', 'document_version_id' => $row['document_version_id'], 'detail' => 'Base64 decoded SHA-256 does not match'];
+            foreach ($ids as $idRow) {
+                $lastId = (int) $idRow['blob_id'];
+                $row = Db::fetchOne(
+                    'SELECT document_version_id, sha256, base64_data FROM document_blobs WHERE blob_id = ?',
+                    [$lastId]
+                );
+                if ($row === null) {
+                    continue;
+                }
+                $data = $row['base64_data'];
+                if (!is_string($data)) {
+                    $errors++;
+                    $issues[] = ['type' => 'hash_error', 'document_version_id' => $row['document_version_id'], 'detail' => 'Blob has no Base64 payload'];
+                    continue;
+                }
+                if (!Base64::verifySha256($data, (string) $row['sha256'])) {
+                    $errors++;
+                    $issues[] = ['type' => 'hash_error', 'document_version_id' => $row['document_version_id'], 'detail' => 'Base64 decoded SHA-256 does not match'];
+                }
+                unset($row, $data);
             }
         }
 

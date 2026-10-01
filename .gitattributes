@@ -1,0 +1,19 @@
+# Normalise line endings: shell scripts and configs copied into Linux
+# containers break with CRLF (e.g. "/bin/sh^M: not found").
+* text=auto eol=lf
+*.sh text eol=lf
+*.php text eol=lf
+*.sql text eol=lf
+*.conf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz binary
+*.pdf binary

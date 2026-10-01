@@ -55,7 +55,9 @@ final class PathGuard
             return false;
         }
 
-        return preg_match('#^[A-Za-z0-9._\-+ ()äöüÄÖÜß]+$#u', $name) === 1
+        // SECURITY FIX: "D" modifier - without it "$" also matched before a
+        // trailing newline, so names like "file.txt\n" passed the check.
+        return preg_match('#^[A-Za-z0-9._\-+ ()äöüÄÖÜß]+$#uD', $name) === 1
             && !str_contains($name, '/')
             && !str_contains($name, '\\');
     }

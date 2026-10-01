@@ -93,14 +93,15 @@ final class JsonClient
         }
 
         if ($body === false) {
-            throw new \RuntimeException(sprintf('%s %s failed (network error)', $method, $url));
+            // UpstreamException: details are logged, the API client only sees a generic 502.
+            throw new UpstreamException(sprintf('%s %s failed (network error)', $method, $url));
         }
         $decoded = json_decode($body, true);
         if ($status >= 400) {
             $message = is_array($decoded) && isset($decoded['detail'])
-                ? (string) $decoded['detail']
+                ? (is_string($decoded['detail']) ? $decoded['detail'] : (string) json_encode($decoded['detail']))
                 : (is_array($decoded) && isset($decoded['error']) ? (string) $decoded['error'] : 'HTTP ' . $status);
-            throw new \RuntimeException(sprintf('%s %s -> %d: %s', $method, $url, $status, $message));
+            throw new UpstreamException(sprintf('%s %s -> %d: %s', $method, $url, $status, $message));
         }
 
         Logger::channel('http')->debug('request', ['method' => $method, 'url' => $url, 'status' => $status]);

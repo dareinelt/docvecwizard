@@ -36,6 +36,7 @@ Docker-Netzwerke erreichbar.
 # 1. Konfiguration anlegen
 cp .env.example .env
 #    .env editieren – insbesondere Passwörter und Secrets ändern
+#    (SESSION_SECRET: openssl rand -hex 32) und ADMIN_PASSWORD setzen
 
 # 2. Images bauen
 docker compose build
@@ -51,7 +52,11 @@ docker compose logs -f app worker
 ```
 
 Die Oberfläche ist anschließend unter **https://localhost:8443** erreichbar
-(selbstsigniertes Zertifikat, daher Browser-Warnung bestätigen).
+(selbstsigniertes Zertifikat, daher Browser-Warnung bestätigen). Anmeldung mit
+`ADMIN_USERNAME`/`ADMIN_PASSWORD` aus `.env`; das Passwort kann danach in der
+Oberfläche unter „Einstellungen“ geändert und `ADMIN_PASSWORD` aus `.env`
+entfernt werden. Ohne gesetztes `ADMIN_PASSWORD` ein Konto anlegen mit
+`docker compose exec app php bin/set-password.php admin`.
 
 ## Voraussetzungen
 

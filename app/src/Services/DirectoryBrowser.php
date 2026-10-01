@@ -25,10 +25,11 @@ final class DirectoryBrowser
      */
     public function list(string $relative): array
     {
+        $relative = PathGuard::normalise($relative);
         $root = $this->root();
         $absolute = PathGuard::resolve($root, $relative);
         if (!is_dir($absolute)) {
-            throw new \InvalidArgumentException('Not a directory: ' . $relative);
+            throw new \InvalidArgumentException('Verzeichnis nicht gefunden.');
         }
         $entries = [];
         $items = scandir($absolute);
@@ -40,7 +41,11 @@ final class DirectoryBrowser
                 continue;
             }
             $full = $absolute . '/' . $item;
-            $rel = $relative === '' || $relative === '.' ? $item : ltrim($relative, '/') . '/' . $item;
+            // Symlinks are not followed by the scanner either (see ProcessingService::scanFiles).
+            if (is_link($full)) {
+                continue;
+            }
+            $rel = $relative === '' || $relative === '.' ? $item : $relative . '/' . $item;
             $stat = @stat($full);
             $entries[] = [
                 'name' => $item,
@@ -53,7 +58,7 @@ final class DirectoryBrowser
         usort($entries, static fn (array $a, array $b): int => [$a['type'], $a['name']] <=> [$b['type'], $b['name']]);
 
         return [
-            'path' => ltrim($relative, '/'),
+            'path' => $relative,
             'entries' => $entries,
         ];
     }

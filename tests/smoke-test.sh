@@ -25,6 +25,12 @@ HTTPS_PORT="$(grep -E '^HTTPS_PORT=' .env | cut -d= -f2- | tr -d '[:space:]')"
 HTTPS_PORT="${HTTPS_PORT:-8443}"
 BASE_URL="https://localhost:${HTTPS_PORT}"
 
+# Admin credentials (environment wins over .env).
+env_value() { grep -E "^$1=" .env 2>/dev/null | head -n1 | cut -d= -f2- | sed -E 's/^["'\'']//; s/["'\'']$//'; }
+ADMIN_USERNAME="${ADMIN_USERNAME:-$(env_value ADMIN_USERNAME)}"
+ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-$(env_value ADMIN_PASSWORD)}"
+
 COOKIE_JAR="$(mktemp -t docvec-smoke-cookies.XXXXXX)"
 EXPORT_FILE="$(mktemp -t docvec-export.XXXXXX.tar.gz)"
 SMOKE_DIR="$ROOT/data/input/smoke"
@@ -53,10 +59,16 @@ check() {
   if eval "$*" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
 }
 
-# api <method> <path> [extra curl args...] -> response body
+# api <method> <path> [extra curl args...] -> response body (authenticated session)
 api() {
   local method="$1"; local path="$2"; shift 2
-  curl -sk -X "$method" "$BASE_URL$path" "$@"
+  curl -sk -X "$method" -b "$COOKIE_JAR" -c "$COOKIE_JAR" "$BASE_URL$path" "$@"
+}
+
+# status <method> <path> [extra curl args...] -> HTTP status code only
+status() {
+  local method="$1"; local path="$2"; shift 2
+  curl -sk -o /dev/null -w '%{http_code}' -X "$method" "$BASE_URL$path" "$@"
 }
 
 # guarded <method> <path> -> response body (with CSRF header + cookie jar)
@@ -89,13 +101,34 @@ check "TLS certificate subject contains localhost" \
   "echo | openssl s_client -connect localhost:${HTTPS_PORT} -servername localhost 2>/dev/null | openssl x509 -noout -subject 2>/dev/null | grep -qi 'CN'"
 check "TLS 1.2 handshake succeeds" \
   "echo | openssl s_client -connect localhost:${HTTPS_PORT} -tls1_2 2>/dev/null | grep -q 'CONNECTED'"
+HEADERS="$(curl -skI "$BASE_URL/")"
+check "Content-Security-Policy header present" "printf '%s' \"\$HEADERS\" | grep -qi '^content-security-policy:'"
+check "HSTS header present" "printf '%s' \"\$HEADERS\" | grep -qi '^strict-transport-security:'"
+check "X-Frame-Options DENY" "printf '%s' \"\$HEADERS\" | grep -qi '^x-frame-options: *deny'"
 
 # ---------------------------------------------------------------------------
-# 3. Web / PHP / API liveness
+# 3. Web / PHP / API liveness & authentication
 # ---------------------------------------------------------------------------
-section "3. Web, PHP, API liveness"
+section "3. Web, PHP, API liveness & authentication"
 check "PHP front controller /healthz returns ok" \
   "api GET /healthz | jq -e '.status == \"ok\"'"
+check "API rejects anonymous requests (401)" \
+  "test \"\$(status GET /api/system)\" = 401"
+ME_JSON="$(api GET /api/auth/me)"
+CSRF_TOKEN="$(printf '%s' "$ME_JSON" | jq -r '.csrf_token // empty')"
+check "CSRF token issued" "test -n '$CSRF_TOKEN'"
+check "session cookie stored" "grep -q docvec_sid '$COOKIE_JAR'"
+check "login without CSRF token is rejected (403)" \
+  "test \"\$(status POST /api/auth/login -H 'Content-Type: application/json' --data '{}')\" = 403"
+if [ -z "$ADMIN_PASSWORD" ]; then
+  bad "ADMIN_PASSWORD is set (environment or .env)"
+fi
+LOGIN_BODY="$(jq -nc --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" '{username:$u,password:$p}')"
+LOGIN_JSON="$(curl -sk -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" \
+  -H "x-csrf-token: ${CSRF_TOKEN}" -H 'Content-Type: application/json' \
+  --data "$LOGIN_BODY" "$BASE_URL/api/auth/login")"
+NEW_TOKEN="$(printf '%s' "$LOGIN_JSON" | jq -r '.csrf_token // empty')"
+if [ -n "$NEW_TOKEN" ]; then CSRF_TOKEN="$NEW_TOKEN"; ok "admin login succeeded"; else bad "admin login succeeded"; fi
 check "system info exposes version and PHP" \
   "api GET /api/system | jq -e '.app.version and .php.version'"
 
@@ -138,10 +171,8 @@ ROWCOUNT_BEFORE="$(api GET "/api/collections/${COLLECTION}/stats" | jq -r '.data
 # 6. Directory browser & CSRF
 # ---------------------------------------------------------------------------
 section "6. Directory browser & CSRF"
-CSRF_JSON="$(curl -sk -c "$COOKIE_JAR" -b "$COOKIE_JAR" "$BASE_URL/api/csrf")"
-CSRF_TOKEN="$(printf '%s' "$CSRF_JSON" | jq -r '.csrf_token // empty')"
-check "CSRF token issued" "test -n '$CSRF_TOKEN'"
-check "session cookie stored" "grep -q docvec_session '$COOKIE_JAR'"
+check "state-changing request without CSRF token is rejected (403)" \
+  "test \"\$(status POST /api/jobs -b '$COOKIE_JAR' -H 'Content-Type: application/json' --data '{}')\" = 403"
 check "directory browser lists fixtures" \
   "api GET '/api/browse?path=fixtures' | jq -e '.entries | length >= 1'"
 

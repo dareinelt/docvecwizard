@@ -14,4 +14,10 @@ final class Uuid
 
         return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
     }
+
+    /** Validate the canonical 8-4-4-4-12 hex form (any version). */
+    public static function isValid(string $value): bool
+    {
+        return preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iD', $value) === 1;
+    }
 }

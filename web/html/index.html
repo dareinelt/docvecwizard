@@ -4,22 +4,50 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="same-origin">
   <title>Document Embedding Manager</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/css/app.css">
 </head>
 <body>
-  <div class="app">
-    <aside class="sidebar">
+  <a class="skip-link" href="#view">Zum Inhalt springen</a>
+
+  <!-- Login screen (shown when the session is not authenticated). -->
+  <div id="login-screen" class="login-screen hidden">
+    <main class="login-card card" aria-labelledby="login-title">
+      <div class="brand brand-login">
+        <img src="/assets/favicon.svg" alt="" width="32" height="32">
+        <div class="brand-text">
+          <strong>DocVec</strong>
+          <span>Embedding Manager</span>
+        </div>
+      </div>
+      <h1 id="login-title">Anmelden</h1>
+      <form id="login-form" novalidate>
+        <label for="login-username">Benutzername</label>
+        <input id="login-username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64">
+        <label for="login-password">Passwort</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+        <p id="login-error" class="form-error" role="alert" aria-live="assertive"></p>
+        <button class="btn btn-primary btn-block mt" type="submit">Anmelden</button>
+      </form>
+    </main>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside class="sidebar" aria-label="Hauptnavigation">
       <div class="brand">
         <img src="/assets/favicon.svg" alt="" width="28" height="28">
         <div class="brand-text">
           <strong>DocVec</strong>
           <span>Embedding Manager</span>
         </div>
+        <button id="nav-toggle" class="btn btn-ghost nav-toggle" type="button" aria-expanded="false" aria-controls="nav">
+          <span aria-hidden="true">☰</span><span class="visually-hidden">Menü</span>
+        </button>
       </div>
       <nav id="nav" class="nav">
-        <a href="#dashboard" data-view="dashboard" class="active">Dashboard</a>
+        <a href="#dashboard" data-view="dashboard">Dashboard</a>
         <a href="#documents" data-view="documents">Dokumente</a>
         <a href="#browse" data-view="browse">Ordner</a>
         <a href="#jobs" data-view="jobs">Aufträge</a>
@@ -31,34 +59,44 @@
         <a href="#settings" data-view="settings">Einstellungen</a>
         <a href="#system" data-view="system">System</a>
       </nav>
-      <div class="sidebar-footer">
-        <span id="health-dot" class="dot dot-unknown" title="Verbindung"></span>
+      <div class="sidebar-footer" role="status" aria-live="polite">
+        <span id="health-dot" class="dot dot-unknown" aria-hidden="true"></span>
         <span id="health-label">Verbinde…</span>
       </div>
     </aside>
 
-    <main class="content">
+    <div class="content">
       <header class="topbar">
         <h1 id="view-title">Dashboard</h1>
         <div class="topbar-actions">
-          <button id="refresh-btn" class="btn btn-ghost" title="Neu laden">↻ Aktualisieren</button>
+          <span id="current-user" class="muted user-label"></span>
+          <button id="refresh-btn" class="btn btn-ghost" type="button">
+            <span aria-hidden="true">↻</span> Aktualisieren
+          </button>
+          <button id="logout-btn" class="btn btn-ghost" type="button">Abmelden</button>
         </div>
       </header>
-      <div id="view" class="view"><div class="spinner">Lade…</div></div>
-    </main>
+      <main id="view" class="view" tabindex="-1" aria-labelledby="view-title" aria-busy="false">
+        <div class="spinner">Lade…</div>
+      </main>
+    </div>
   </div>
 
   <div id="modal-backdrop" class="modal-backdrop hidden">
-    <div id="modal" class="modal" role="dialog" aria-modal="true">
+    <div id="modal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
       <div class="modal-head">
         <h2 id="modal-title"></h2>
-        <button id="modal-close" class="btn btn-ghost" aria-label="Schließen">✕</button>
+        <button id="modal-close" class="btn btn-ghost" type="button" aria-label="Dialog schließen">✕</button>
       </div>
       <div id="modal-body" class="modal-body"></div>
     </div>
   </div>
 
-  <div id="toast-root" class="toast-root"></div>
+  <!-- Success/info messages are announced politely, errors assertively. -->
+  <div class="toast-stack">
+    <div id="toast-root-alert" class="toast-root" role="alert" aria-live="assertive"></div>
+    <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+  </div>
 
   <script src="/assets/js/app.js"></script>
 </body>

@@ -42,4 +42,38 @@ final class SettingsService
             $this->set($key, (string) $value);
         }
     }
+
+    /**
+     * Validate and persist user-submitted settings. Keys are restricted to a
+     * conservative identifier pattern and values to scalars of bounded size
+     * (previously any key/value - including arrays cast to "Array" - was stored).
+     *
+     * @param array<mixed,mixed> $values
+     * @throws \InvalidArgumentException
+     */
+    public function update(array $values): void
+    {
+        if (count($values) > 100) {
+            throw new \InvalidArgumentException('Zu viele Einstellungen in einer Anfrage.');
+        }
+        $clean = [];
+        foreach ($values as $key => $value) {
+            $key = (string) $key;
+            if (preg_match('/^[a-z][a-z0-9_.-]{0,63}$/iD', $key) !== 1) {
+                throw new \InvalidArgumentException('Ungültiger Einstellungsschlüssel: ' . mb_substr($key, 0, 64));
+            }
+            if (is_bool($value)) {
+                $value = $value ? '1' : '0';
+            }
+            if (!is_string($value) && !is_int($value) && !is_float($value)) {
+                throw new \InvalidArgumentException('Ungültiger Wert für Einstellung: ' . $key);
+            }
+            $value = (string) $value;
+            if (mb_strlen($value) > 4096) {
+                throw new \InvalidArgumentException('Wert zu lang für Einstellung: ' . $key);
+            }
+            $clean[$key] = $value;
+        }
+        Db::transaction(fn () => $this->setMany($clean));
+    }
 }
