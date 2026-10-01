@@ -6,8 +6,12 @@ declare(strict_types=1);
  * Worker: long-running CLI job processor.
  *
  *  - Atomically claims jobs (CREATED -> RUNNING) and documents
- *    (DISCOVERED/PENDING -> PROCESSING) so multiple replicas can run safely.
- *  - Recovers from crashes on startup by re-queueing stuck jobs/documents.
+ *    (DISCOVERED/PENDING -> PROCESSING).
+ *  - Only one worker is active at a time (MySQL advisory lock); further
+ *    replicas wait as standby and take over when the active one stops.
+ *  - Recovers from crashes on startup by re-queueing stuck jobs/documents;
+ *    re-processing a document is idempotent (old partial chunks/vectors are
+ *    removed first, see ProcessingService::processDocument).
  *  - Handles SIGTERM/SIGINT for graceful shutdown (finishes the current
  *    document, then re-queues it so another run resumes).
  */
@@ -80,6 +84,21 @@ function recoverStaleWork(): void
 }
 
 $log->info('worker starting', ['pid' => getmypid()]);
+
+// FIX: crash recovery (below) and the graceful-shutdown re-queue reset *all*
+// PROCESSING documents. With more than one worker replica, one instance
+// therefore re-queued documents another instance was still processing
+// (duplicate chunks/vectors). A MySQL advisory lock now guarantees a single
+// active worker; additional replicas wait as hot standby.
+const WORKER_LOCK = 'docvecwizard_worker';
+while (!Db::lock(WORKER_LOCK, 10)) {
+    if ($stopping) {
+        $log->info('worker stopped while waiting for the worker lock');
+        exit(0);
+    }
+    $log->debug('another worker holds the lock; standing by');
+}
+$log->info('worker lock acquired');
 
 // Sync model catalog from the embedding service (dimension metadata is
 // authoritative and must never be hard-coded).
@@ -173,7 +192,9 @@ while (!$stopping) {
 }
 
 // Graceful shutdown: re-queue any document we may have left mid-flight.
+// Safe because this process holds the single-worker lock.
 Db::execute("UPDATE documents SET processing_status = 'DISCOVERED' WHERE processing_status = 'PROCESSING'");
+Db::unlock(WORKER_LOCK);
 $log->info('worker stopped gracefully');
 
 exit(0);

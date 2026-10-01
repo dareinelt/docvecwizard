@@ -88,7 +88,10 @@ ${DATA_DIR}/exports  → /srv/data/exports
 
 | Variable | Standard | Beschreibung |
 | --- | --- | --- |
-| `UPLOAD_MAX_SIZE` | `100M` | Maximale Upload-Größe |
+| `UPLOAD_MAX_SIZE` | `100M` | Maximale Größe je Upload-Datei (setzt auch PHP `upload_max_filesize`) |
+| `POST_MAX_SIZE` | `200M` | Maximale Request-Größe (PHP `post_max_size`; nginx `client_max_body_size` = 200m) |
+| `IMPORT_MAX_ENTRIES` | `200000` | Maximale Anzahl Einträge in einem Import-Archiv |
+| `IMPORT_MAX_BYTES` | `10737418240` | Maximale entpackte Größe eines Import-Archivs (Bytes) |
 | `CONVERT_TIMEOUT` | `300` | Timeout der Konvertierung |
 
 ## Chunking
@@ -113,14 +116,29 @@ ${DATA_DIR}/exports  → /srv/data/exports
 
 | Variable | Standard | Beschreibung |
 | --- | --- | --- |
-| `SESSION_SECRET` | – | Signaturgeheimnis für Sessions (**ändern!**) |
-| `CSRF_SECRET` | – | Geheimnis für CSRF-Tokens (**ändern!**) |
+| `SESSION_SECRET` | – | Geheimnis (min. 32 Zeichen) zur Verschlüsselung gespeicherter TLS-Schlüssel (**ändern!**, Platzhalter werden abgelehnt) |
+| `SESSION_IDLE_TIMEOUT` | `1800` | Sitzungs-Leerlauf-Timeout in Sekunden |
+| `SESSION_ABSOLUTE_TIMEOUT` | `43200` | Maximale Sitzungsdauer in Sekunden |
+| `LOGIN_MAX_ATTEMPTS_USER` | `5` | Fehlversuche je Benutzer im Zeitfenster |
+| `LOGIN_MAX_ATTEMPTS_IP` | `20` | Fehlversuche je IP im Zeitfenster |
+| `LOGIN_THROTTLE_WINDOW` | `900` | Zeitfenster/Sperrdauer in Sekunden |
+| `ADMIN_USERNAME` | `admin` | Initialer Administrator (nur `migrate`, nur wenn kein Konto existiert) |
+| `ADMIN_PASSWORD` | – | Initiales Passwort (min. 12 Zeichen); nach dem ersten Start entfernen |
 
-Beide Secrets erzeugen:
+Secret erzeugen:
 
 ```bash
 openssl rand -hex 32
 ```
+
+Passwort setzen/zurücksetzen oder weiteres Konto anlegen:
+
+```bash
+docker compose exec app php bin/set-password.php admin
+```
+
+`CSRF_SECRET` wird nicht mehr verwendet (CSRF-Tokens sind zufällige
+Session-Tokens).
 
 ## Logging
 

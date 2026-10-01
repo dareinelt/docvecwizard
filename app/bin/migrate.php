@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 use App\Core\Db;
 use App\Core\Logger;
+use App\Services\UserService;
 
 require __DIR__ . '/../config/bootstrap.php';
 
@@ -53,6 +54,10 @@ try {
     }
 
     $log->info('migrations complete', ['applied' => $applied]);
+
+    // Seed the first administrator from ADMIN_USERNAME / ADMIN_PASSWORD (only
+    // when no account exists yet; existing passwords are never overwritten).
+    (new UserService())->ensureInitialAdmin();
 } finally {
     Db::unlock('docvec_migrate');
 }

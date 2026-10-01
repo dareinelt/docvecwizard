@@ -1,4 +1,11 @@
-/* Document Embedding Manager - single-page UI (vanilla JS, no frameworks/CDN). */
+/* Document Embedding Manager - single-page UI (vanilla JS, no frameworks/CDN).
+ *
+ * Security notes (audit fixes):
+ *  - every dynamic value is HTML-escaped via esc() before it is put into markup
+ *  - every path parameter is URL-encoded via enc()
+ *  - no inline event handlers / style attributes (strict Content-Security-Policy)
+ *  - the API requires a session login; 401 responses show the login screen
+ */
 (function () {
   'use strict';
 
@@ -7,9 +14,12 @@
 
   const state = {
     csrf: null,
-    health: null,
+    user: null,
     currentView: 'dashboard',
     browsePath: '',
+    pollTimer: null,
+    lastFocus: null,
+    navToken: 0,
   };
 
   /* ---------- utilities ---------- */
@@ -21,6 +31,9 @@
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
   }
+
+  // FIX: IDs were concatenated into URLs without encoding.
+  const enc = value => encodeURIComponent(String(value == null ? '' : value));
 
   function fmtBytes(n) {
     n = Number(n) || 0;
@@ -35,12 +48,18 @@
     if (!s) return '–';
     const d = new Date(String(s).replace(' ', 'T') + (String(s).includes('T') ? '' : 'Z'));
     if (isNaN(d.getTime())) return esc(s);
-    return d.toLocaleString('de-DE');
+    return esc(d.toLocaleString('de-DE'));
   }
 
   function fmtNumber(n) {
     return Number(n || 0).toLocaleString('de-DE');
   }
+
+  const STATUS_LABELS = {
+    COMPLETED: 'Abgeschlossen', RUNNING: 'Läuft', CREATED: 'Erstellt', PENDING: 'Wartend',
+    PROCESSING: 'In Verarbeitung', DISCOVERED: 'Gefunden', FAILED: 'Fehlgeschlagen',
+    CANCELLED: 'Abgebrochen', IMPORTED: 'Importiert', PAUSED: 'Pausiert',
+  };
 
   function statusBadge(status) {
     const s = String(status || '').toUpperCase();
@@ -50,46 +69,201 @@
       FAILED: 'badge-red', CANCELLED: 'badge-amber', IMPORTED: 'badge-green',
       PAUSED: 'badge-amber',
     };
-    return '<span class="badge ' + (map[s] || 'badge-gray') + '">' + esc(status || '–') + '</span>';
+    const label = STATUS_LABELS[s] || status || '–';
+    return '<span class="badge ' + (map[s] || 'badge-gray') + '" title="' + esc(status || '') + '">' + esc(label) + '</span>';
   }
 
-  async function api(path, opts) {
+  class ApiError extends Error {
+    constructor(message, status) { super(message); this.status = status; }
+  }
+
+  const GENERIC_ERRORS = {
+    401: 'Bitte melden Sie sich an.',
+    403: 'Zugriff verweigert.',
+    404: 'Nicht gefunden.',
+    413: 'Die Datei ist zu groß.',
+    429: 'Zu viele Anfragen. Bitte später erneut versuchen.',
+    502: 'Ein abhängiger Dienst ist nicht erreichbar.',
+    504: 'Zeitüberschreitung beim Server.',
+  };
+
+  async function api(path, opts, retried) {
     opts = opts || {};
     const method = (opts.method || 'GET').toUpperCase();
     const headers = Object.assign({ Accept: 'application/json' }, opts.headers || {});
-    if (method !== 'GET' && state.csrf) headers['X-CSRF-Token'] = state.csrf;
+    if (method !== 'GET' && method !== 'HEAD' && state.csrf) headers['X-CSRF-Token'] = state.csrf;
     let body = opts.body;
     if (body != null && !(body instanceof FormData) && typeof body === 'object') {
       headers['Content-Type'] = 'application/json';
       body = JSON.stringify(body);
     }
-    const res = await fetch(path, Object.assign({}, opts, { method, headers, body }));
+    let res;
+    try {
+      res = await fetch(path, { method, headers, body, credentials: 'same-origin', cache: 'no-store' });
+    } catch (e) {
+      throw new ApiError('Server nicht erreichbar. Bitte Verbindung prüfen.', 0);
+    }
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+    if (data && typeof data.csrf_token === 'string') state.csrf = data.csrf_token;
+
     if (!res.ok) {
-      const msg = (data && data.error) || ('HTTP ' + res.status);
-      throw new Error(msg);
+      const msg = (data && data.error) || GENERIC_ERRORS[res.status] || ('Fehler (HTTP ' + res.status + ')');
+      // FIX: session expired -> show the login screen instead of failing silently.
+      if (res.status === 401 && !path.startsWith('/api/auth/')) {
+        showLogin('Ihre Sitzung ist abgelaufen. Bitte erneut anmelden.');
+      }
+      // CSRF token stale (e.g. after a server-side session rotation): refresh once and retry.
+      if (res.status === 403 && !retried && method !== 'GET') {
+        const fresh = await refreshSession();
+        if (fresh) return api(path, opts, true);
+      }
+      throw new ApiError(msg, res.status);
     }
     return data;
+  }
+
+  /** Reload login state + CSRF token. Returns true when still authenticated. */
+  async function refreshSession() {
+    try {
+      const me = await api('/api/auth/me');
+      state.user = me.authenticated ? me.user : null;
+      return !!me.authenticated;
+    } catch (e) { return false; }
   }
 
   function notify(msg, type) {
     const el = document.createElement('div');
     el.className = 'toast ' + (type || '');
-    el.textContent = msg;
-    $('#toast-root').appendChild(el);
-    setTimeout(() => el.remove(), 4000);
+    const text = document.createElement('span');
+    text.className = 'toast-msg';
+    text.textContent = msg;
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Meldung schließen');
+    close.textContent = '✕';
+    close.addEventListener('click', () => el.remove());
+    el.append(text, close);
+    // Errors go into the assertive live region and stay longer.
+    $(type === 'error' ? '#toast-root-alert' : '#toast-root').appendChild(el);
+    setTimeout(() => el.remove(), type === 'error' ? 8000 : 4000);
   }
 
+  /** Disable a button while an async action runs (prevents double submits). */
+  async function busy(btn, fn) {
+    if (!btn || btn.getAttribute('aria-busy') === 'true') return undefined;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = label + ' …';
+    try { return await fn(); }
+    finally {
+      if (btn.isConnected) {
+        btn.disabled = false;
+        btn.removeAttribute('aria-busy');
+        btn.textContent = label;
+      }
+    }
+  }
+
+  /* ---------- modal (focus management, Escape, focus trap) ---------- */
+  const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
   function openModal(title, html) {
+    if ($('#modal-backdrop').classList.contains('hidden')) state.lastFocus = document.activeElement;
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = html;
     $('#modal-backdrop').classList.remove('hidden');
+    const first = $(FOCUSABLE, $('#modal-body'));
+    (first || $('#modal')).focus();
   }
-  function closeModal() { $('#modal-backdrop').classList.add('hidden'); }
+
+  function closeModal() {
+    $('#modal-backdrop').classList.add('hidden');
+    $('#modal-body').innerHTML = '';
+    if (state.lastFocus && state.lastFocus.isConnected) state.lastFocus.focus();
+    state.lastFocus = null;
+  }
+
+  function modalKeydown(ev) {
+    if ($('#modal-backdrop').classList.contains('hidden')) return;
+    if (ev.key === 'Escape') { ev.preventDefault(); closeModal(); return; }
+    if (ev.key !== 'Tab') return;
+    const items = $$(FOCUSABLE, $('#modal')).filter(x => x.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+  }
 
   function renderInto(el, html) { el.innerHTML = html; }
+
+  /** Make table rows with data-* attributes clickable and keyboard-operable. */
+  function rowActivation(container, selector, handler) {
+    container.addEventListener('click', ev => {
+      if (ev.target.closest('button, a, input, select, textarea')) return;
+      const tr = ev.target.closest(selector);
+      if (tr && container.contains(tr)) handler(tr);
+    });
+    container.addEventListener('keydown', ev => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      const tr = ev.target.closest(selector);
+      if (tr && ev.target === tr) { ev.preventDefault(); handler(tr); }
+    });
+  }
+
+  /* ---------- authentication ---------- */
+  function showLogin(message) {
+    state.user = null;
+    stopPolling();
+    closeModal();
+    $('#app').classList.add('hidden');
+    $('#login-screen').classList.remove('hidden');
+    $('#login-error').textContent = message || '';
+    $('#login-password').value = '';
+    $('#login-username').focus();
+  }
+
+  function showApp() {
+    $('#login-screen').classList.add('hidden');
+    $('#app').classList.remove('hidden');
+    $('#current-user').textContent = state.user ? 'Angemeldet als ' + state.user.username : '';
+    const initial = (location.hash || '#dashboard').slice(1);
+    navigate(VIEWS[initial] ? initial : 'dashboard');
+    startPolling();
+  }
+
+  async function onLogin(ev) {
+    ev.preventDefault();
+    const btn = $('#login-form button[type=submit]');
+    const username = $('#login-username').value.trim();
+    const password = $('#login-password').value;
+    if (!username || !password) {
+      $('#login-error').textContent = 'Bitte Benutzername und Passwort eingeben.';
+      return;
+    }
+    $('#login-error').textContent = '';
+    await busy(btn, async () => {
+      try {
+        if (!state.csrf) await refreshSession();
+        const r = await api('/api/auth/login', { method: 'POST', body: { username, password } });
+        state.user = r.user;
+        $('#login-password').value = '';
+        showApp();
+      } catch (e) {
+        $('#login-error').textContent = e.message;
+        $('#login-password').select();
+      }
+    });
+  }
+
+  async function onLogout() {
+    try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { /* show login regardless */ }
+    showLogin('Sie wurden abgemeldet.');
+  }
 
   /* ---------- navigation ---------- */
   const TITLES = {
@@ -106,16 +280,36 @@
     settings: renderSettings, system: renderSystem,
   };
 
-  function navigate(view) {
+  function navigate(view, keepFocus) {
+    if (!state.user) return;
     state.currentView = view;
-    $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.view === view));
-    $('#view-title').textContent = TITLES[view] || view;
-    const viewEl = $('#view');
-    viewEl.innerHTML = '<div class="spinner">Lade…</div>';
-    const fn = VIEWS[view] || renderDashboard;
-    Promise.resolve(fn(viewEl)).catch(err => {
-      viewEl.innerHTML = '<div class="card"><p class="muted">Fehler: ' + esc(err.message) + '</p></div>';
+    $$('#nav a').forEach(a => {
+      const active = a.dataset.view === view;
+      a.classList.toggle('active', active);
+      if (active) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
+    $('#nav').classList.remove('open');
+    $('#nav-toggle').setAttribute('aria-expanded', 'false');
+    $('#view-title').textContent = TITLES[view] || view;
+    document.title = (TITLES[view] || view) + ' – Document Embedding Manager';
+    const viewEl = $('#view');
+    // Replace the element to drop all listeners of the previous view (event delegation is per view).
+    const fresh = viewEl.cloneNode(false);
+    viewEl.replaceWith(fresh);
+    fresh.innerHTML = '<div class="spinner">Lade…</div>';
+    fresh.setAttribute('aria-busy', 'true');
+    const token = ++state.navToken;
+    const fn = VIEWS[view] || renderDashboard;
+    Promise.resolve(fn(fresh))
+      .catch(err => {
+        if (token !== state.navToken || (err && err.status === 401)) return;
+        fresh.innerHTML = '<div class="card"><p class="muted">Fehler: ' + esc(err.message) + '</p>' +
+          '<button class="btn mt" type="button" data-retry>Erneut versuchen</button></div>';
+        const retry = $('[data-retry]', fresh);
+        if (retry) retry.addEventListener('click', () => navigate(view));
+      })
+      .finally(() => { fresh.setAttribute('aria-busy', 'false'); });
+    if (!keepFocus) fresh.focus({ preventScroll: true });
   }
 
   /* ---------- shared widgets ---------- */
@@ -126,7 +320,7 @@
       return '<option value="">Keine Modelle – bitte unter „System“ synchronisieren</option>';
     }
     return models.map(m =>
-      '<option value="' + esc(m.name) + '"' + (m.name === selected ? ' selected' : '') + '>' +
+      '<option value="' + esc(m.name) + '"' + (m.name === selected || (!selected && m.active) ? ' selected' : '') + '>' +
       esc(m.name) + ' (' + esc(m.dimension) + ' dim' + (m.active ? ', aktiv' : '') + ')</option>'
     ).join('');
   }
@@ -137,8 +331,7 @@
 
   /* ---------- views ---------- */
   async function renderDashboard(el) {
-    const stats = await api('/api/statistics');
-    const jobs = await api('/api/jobs?limit=5');
+    const [stats, jobs] = await Promise.all([api('/api/statistics'), api('/api/jobs?limit=5')]);
     const d = stats.documents || {};
     const j = stats.jobs || {};
     const t = stats.totals || {};
@@ -154,18 +347,19 @@
         <div class="card stat"><div class="value">${fmtNumber(t.tokens)}</div><div class="label">Tokens (geschätzt)</div></div>
         <div class="card stat"><div class="value">${fmtNumber(m.active)}/${fmtNumber(m.total)}</div><div class="label">Aktive Modelle</div></div>
       </div>
-      <div class="card">
-        <h2>Letzte Aufträge</h2>
+      <section class="card" aria-labelledby="dash-jobs">
+        <h2 id="dash-jobs">Letzte Aufträge</h2>
         ${jobsTable(jobs.jobs || [])}
-      </div>
+      </section>
     `);
+    rowActivation(el, 'tr[data-job]', tr => openJob(tr.dataset.job));
   }
 
   function jobsTable(jobs) {
     if (!jobs.length) return '<p class="empty">Keine Aufträge vorhanden.</p>';
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Name</th><th>Quelle</th><th>Modell</th><th>Status</th><th>Dokumente</th><th>Erstellt</th></tr></thead>
-      <tbody>${jobs.map(j => `<tr class="clickable" data-job="${esc(j.job_id)}">
+      <thead><tr><th scope="col">Name</th><th scope="col">Quelle</th><th scope="col">Modell</th><th scope="col">Status</th><th scope="col">Dokumente</th><th scope="col">Erstellt</th></tr></thead>
+      <tbody>${jobs.map(j => `<tr class="clickable" tabindex="0" data-job="${esc(j.job_id)}" aria-label="Auftrag ${esc(j.name)} öffnen">
         <td>${esc(j.name)}</td>
         <td class="mono">${esc(j.source_directory)}</td>
         <td class="mono">${esc(j.embedding_model)}</td>
@@ -178,48 +372,56 @@
 
   async function renderDocuments(el) {
     const r = await api('/api/documents?limit=200');
-    const docs = r.documents || [];
     renderInto(el, `
       <div class="card">
         <div class="flex mb">
-          <input id="doc-filter" class="grow" placeholder="Nach Dateiname/Pfad filtern…">
+          <label for="doc-filter" class="visually-hidden">Dokumente filtern</label>
+          <input id="doc-filter" type="search" class="grow" placeholder="Nach Dateiname/Pfad filtern…" maxlength="200">
+          <span id="doc-count" class="muted" role="status" aria-live="polite"></span>
         </div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Datei</th><th>Pfad</th><th>Status</th><th>Chunks</th><th>Größe</th><th>Modell</th><th></th></tr></thead>
-          <tbody id="doc-rows">${docRows(docs)}</tbody>
+          <thead><tr><th scope="col">Datei</th><th scope="col">Pfad</th><th scope="col">Status</th><th scope="col">Chunks</th><th scope="col">Größe</th><th scope="col">Modell</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr></thead>
+          <tbody id="doc-rows"></tbody>
         </table></div>
       </div>`);
+    const setRows = docs => {
+      $('#doc-rows', el).innerHTML = docRows(docs);
+      $('#doc-count', el).textContent = fmtNumber(docs.length) + ' Treffer';
+    };
+    setRows(r.documents || []);
+
     let timer;
-    $('#doc-filter').addEventListener('input', e => {
+    let seq = 0;
+    $('#doc-filter', el).addEventListener('input', e => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        const q = encodeURIComponent(e.target.value);
-        const r2 = await api('/api/documents?limit=200&search=' + q);
-        $('#doc-rows').innerHTML = docRows(r2.documents || []);
+        const mine = ++seq;
+        try {
+          const r2 = await api('/api/documents?limit=200&search=' + enc(e.target.value));
+          if (mine === seq) setRows(r2.documents || []); // ignore out-of-order responses
+        } catch (err) { notify(err.message, 'error'); }
       }, 250);
     });
-    $$('#doc-rows tr[data-doc]').forEach(tr => {
-      tr.addEventListener('click', ev => {
-        if (ev.target.closest('button')) return;
-        showDocument(tr.dataset.doc);
-      });
+
+    // FIX: event delegation - the previous per-row listeners were lost after the filter re-rendered the rows.
+    const tbody = $('#doc-rows', el);
+    rowActivation(tbody, 'tr[data-doc]', tr => showDocument(tr.dataset.doc));
+    tbody.addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-del]');
+      if (b) deleteDocument(b.dataset.del, b.dataset.name, b);
     });
-    $$('#doc-rows button[data-del]').forEach(b => b.addEventListener('click', ev => {
-      ev.stopPropagation();
-      deleteDocument(b.dataset.del);
-    }));
   }
 
   function docRows(docs) {
     if (!docs.length) return '<tr><td colspan="7" class="muted">Keine Dokumente gefunden.</td></tr>';
-    return docs.map(d => `<tr class="clickable" data-doc="${esc(d.document_id)}">
+    return docs.map(d => `<tr class="clickable" tabindex="0" data-doc="${esc(d.document_id)}" aria-label="Dokument ${esc(d.filename)} anzeigen">
       <td>${esc(d.filename)}</td>
       <td class="mono">${esc(d.relative_path)}</td>
       <td>${statusBadge(d.processing_status)}</td>
       <td>${fmtNumber(d.chunk_count)}</td>
       <td>${fmtBytes(d.file_size)}</td>
       <td class="mono">${esc(d.embedding_model || '–')}</td>
-      <td><button class="btn btn-danger btn-sm" data-del="${esc(d.document_id)}">Löschen</button></td>
+      <td><button class="btn btn-danger btn-sm" type="button" data-del="${esc(d.document_id)}" data-name="${esc(d.filename)}" aria-label="${esc(d.filename)} löschen">Löschen</button></td>
     </tr>`).join('');
   }
 
@@ -230,9 +432,9 @@
     let vectors = [];
     try {
       const [docRes, metaRes, vecRes] = await Promise.all([
-        api('/api/documents/' + id),
-        api('/api/documents/' + id + '/metadata').catch(() => ({ metadata: {} })),
-        api('/api/documents/' + id + '/vectors').catch(() => ({ vectors: [] })),
+        api('/api/documents/' + enc(id)),
+        api('/api/documents/' + enc(id) + '/metadata').catch(() => ({ metadata: {} })),
+        api('/api/documents/' + enc(id) + '/vectors').catch(() => ({ vectors: [] })),
       ]);
       d = docRes.document || {};
       meta = metaRes.metadata || {};
@@ -246,17 +448,21 @@
     const versions = d.versions || [];
     const chunks = d.chunks || [];
     const metaEntries = Object.entries(meta);
+    const tabs = [
+      ['overview', 'Übersicht'],
+      ['versions', 'Versionen (' + versions.length + ')'],
+      ['chunks', 'Chunks (' + chunks.length + ')'],
+      ['vectors', 'Vektoren (' + vectors.length + ')'],
+      ['source', 'Quelle'],
+      ['metadata', 'Metadaten (' + metaEntries.length + ')'],
+    ];
     const html = `
-      <div class="tabs" id="doc-tabs">
-        <button class="tab active" data-tab="overview">Übersicht</button>
-        <button class="tab" data-tab="versions">Versionen (${versions.length})</button>
-        <button class="tab" data-tab="chunks">Chunks (${chunks.length})</button>
-        <button class="tab" data-tab="vectors">Vektoren (${vectors.length})</button>
-        <button class="tab" data-tab="source">Quelle</button>
-        <button class="tab" data-tab="metadata">Metadaten (${metaEntries.length})</button>
+      <div class="tabs" id="doc-tabs" role="tablist" aria-label="Dokumentdetails">
+        ${tabs.map(([key, label], i) => `<button class="tab${i === 0 ? ' active' : ''}" type="button" role="tab"
+          id="tab-${key}" data-tab="${key}" aria-controls="panel-${key}" aria-selected="${i === 0}" tabindex="${i === 0 ? 0 : -1}">${esc(label)}</button>`).join('')}
       </div>
 
-      <div class="tab-panel active" data-panel="overview">
+      <div class="tab-panel active" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" data-panel="overview">
         <div class="grid cards mb">
           <div class="card stat"><div class="value">${esc(s.original_filename || d.filename)}</div><div class="label">Originaldatei</div></div>
           <div class="card stat"><div class="value">${fmtBytes(s.file_size)}</div><div class="label">Originalgröße</div></div>
@@ -264,7 +470,7 @@
           <div class="card stat"><div class="value">${statusBadge(d.processing_status)}</div><div class="label">Status</div></div>
         </div>
         <div class="flex mb">
-          ${s.source_available ? `<a class="btn btn-primary" href="/api/documents/${esc(d.document_id)}/download">Original herunterladen</a>` : '<span class="muted">Original nicht verfügbar</span>'}
+          ${s.source_available ? `<a class="btn btn-primary" href="/api/documents/${enc(d.document_id)}/download">Original herunterladen</a>` : '<span class="muted">Original nicht verfügbar</span>'}
         </div>
         <dl class="kv">
           <dt>Dokument-ID</dt><dd class="mono">${esc(d.document_id)}</dd>
@@ -274,32 +480,33 @@
           <dt>Pfad</dt><dd class="mono">${esc(d.relative_path)}</dd>
           <dt>Seiten</dt><dd>${fmtNumber(d.page_count)}</dd>
           <dt>Chunks</dt><dd>${fmtNumber(d.chunk_count)}</dd>
+          ${d.error_message ? `<dt>Fehler</dt><dd>${esc(d.error_message)}</dd>` : ''}
         </dl>
       </div>
 
-      <div class="tab-panel" data-panel="versions">
+      <div class="tab-panel" id="panel-versions" role="tabpanel" aria-labelledby="tab-versions" data-panel="versions">
         ${versions.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Version</th><th>Versions-ID</th><th>Status</th><th>Chunks</th><th>Größe</th><th>Aktuell</th></tr></thead>
+          <thead><tr><th scope="col">Version</th><th scope="col">Versions-ID</th><th scope="col">Status</th><th scope="col">Chunks</th><th scope="col">Größe</th><th scope="col">Aktuell</th></tr></thead>
           <tbody>${versions.map(v => `<tr>
             <td>${fmtNumber(v.version)}</td>
             <td class="mono">${esc(v.document_version_id)}</td>
             <td>${statusBadge(v.processing_status)}</td>
             <td>${fmtNumber(v.chunk_count)}</td>
             <td>${fmtBytes(v.file_size)}</td>
-            <td>${Number(v.is_current) ? '✓' : ''}</td>
+            <td>${Number(v.is_current) ? '<span aria-label="aktuelle Version">✓</span>' : ''}</td>
           </tr>`).join('')}</tbody></table></div>` : '<p class="empty">Keine Versionen.</p>'}
       </div>
 
-      <div class="tab-panel" data-panel="chunks">
+      <div class="tab-panel" id="panel-chunks" role="tabpanel" aria-labelledby="tab-chunks" data-panel="chunks">
         ${chunks.map(c => `<div class="card mb">
           <div class="muted">Chunk ${fmtNumber(c.chunk_index)} · ${fmtNumber(c.token_count)} Tokens · Textlänge ${fmtNumber(c.text_length)} · <span class="mono">${esc(c.chunk_id)}</span></div>
-          <p>${esc(String(c.text || '').slice(0, 600))}${(c.text || '').length > 600 ? '…' : ''}</p>
+          <p>${esc(String(c.text || '').slice(0, 600))}${String(c.text || '').length > 600 ? '…' : ''}</p>
         </div>`).join('') || '<p class="empty">Keine Chunks.</p>'}
       </div>
 
-      <div class="tab-panel" data-panel="vectors">
+      <div class="tab-panel" id="panel-vectors" role="tabpanel" aria-labelledby="tab-vectors" data-panel="vectors">
         ${vectors.length ? `<div class="table-wrap"><table>
-          <thead><tr><th>Index</th><th>Vektor-ID</th><th>Chunk-ID</th><th>Seite</th></tr></thead>
+          <thead><tr><th scope="col">Index</th><th scope="col">Vektor-ID</th><th scope="col">Chunk-ID</th><th scope="col">Seite</th></tr></thead>
           <tbody>${vectors.map(v => `<tr>
             <td>${fmtNumber(v.chunk_index)}</td>
             <td class="mono">${esc(v.vector_id)}</td>
@@ -308,7 +515,7 @@
           </tr>`).join('')}</tbody></table></div>` : '<p class="empty">Keine Vektoren.</p>'}
       </div>
 
-      <div class="tab-panel" data-panel="source">
+      <div class="tab-panel" id="panel-source" role="tabpanel" aria-labelledby="tab-source" data-panel="source">
         <dl class="kv">
           <dt>Originaldatei</dt><dd>${esc(s.original_filename || d.filename)}</dd>
           <dt>MIME-Typ</dt><dd>${esc(s.mime_type || d.mime_type)}</dd>
@@ -321,21 +528,41 @@
         </dl>
       </div>
 
-      <div class="tab-panel" data-panel="metadata">
+      <div class="tab-panel" id="panel-metadata" role="tabpanel" aria-labelledby="tab-metadata" data-panel="metadata">
         ${metaEntries.length ? `<pre class="code">${esc(JSON.stringify(meta, null, 2))}</pre>` : '<p class="empty">Keine Metadaten.</p>'}
       </div>`;
 
+    $('#modal-title').textContent = 'Dokument: ' + (d.filename || '');
     $('#modal-body').innerHTML = html;
-    $$('#doc-tabs .tab').forEach(t => t.addEventListener('click', () => {
-      $$('#doc-tabs .tab').forEach(x => x.classList.toggle('active', x === t));
+    const tabButtons = $$('#doc-tabs .tab');
+    const select = t => {
+      tabButtons.forEach(x => {
+        const on = x === t;
+        x.classList.toggle('active', on);
+        x.setAttribute('aria-selected', String(on));
+        x.tabIndex = on ? 0 : -1;
+      });
       $$('#modal-body .tab-panel').forEach(p => p.classList.toggle('active', p.dataset.panel === t.dataset.tab));
-    }));
+    };
+    tabButtons.forEach((t, i) => {
+      t.addEventListener('click', () => select(t));
+      // Arrow-key navigation per WAI-ARIA tabs pattern.
+      t.addEventListener('keydown', ev => {
+        let next = null;
+        if (ev.key === 'ArrowRight') next = tabButtons[(i + 1) % tabButtons.length];
+        if (ev.key === 'ArrowLeft') next = tabButtons[(i - 1 + tabButtons.length) % tabButtons.length];
+        if (next) { ev.preventDefault(); select(next); next.focus(); }
+      });
+    });
+    tabButtons[0].focus();
   }
 
-  async function deleteDocument(id) {
-    if (!confirm('Dokument wirklich löschen? (inkl. Vektoren in Milvus)')) return;
-    try { await api('/api/documents/' + id, { method: 'DELETE' }); notify('Dokument gelöscht.', 'success'); navigate('documents'); }
-    catch (e) { notify(e.message, 'error'); }
+  async function deleteDocument(id, name, btn) {
+    if (!confirm('Dokument „' + (name || id) + '“ wirklich löschen?\nAlle Versionen, Chunks und Vektoren in Milvus werden entfernt.')) return;
+    await busy(btn, async () => {
+      try { await api('/api/documents/' + enc(id), { method: 'DELETE' }); notify('Dokument gelöscht.', 'success'); navigate('documents', true); }
+      catch (e) { notify(e.message, 'error'); }
+    });
   }
 
   async function renderBrowse(el) {
@@ -343,25 +570,32 @@
   }
 
   async function browse(el, path) {
-    const r = await api('/api/browse?path=' + encodeURIComponent(path));
+    let r;
+    try {
+      r = await api('/api/browse?path=' + enc(path));
+    } catch (e) {
+      // Directory vanished: fall back to the root instead of a dead end.
+      if (e.status === 404 && path) { state.browsePath = ''; return browse(el, ''); }
+      throw e;
+    }
     const entries = r.entries || [];
-    const crumbs = buildCrumbs(r.path || '');
+    const current = r.path || '';
     renderInto(el, `
       <div class="card">
-        <div class="flex mb">
-          <nav class="mono muted" id="crumbs" style="flex-wrap:wrap">${crumbs}</nav>
-        </div>
-        <form id="upload-form" class="mb">
-          <input type="file" name="files" multiple style="width:auto">
+        <nav class="mono muted crumbs mb" aria-label="Pfad">${buildCrumbs(current)}</nav>
+        <form id="upload-form" class="flex wrap mb">
+          <label for="upload-files" class="visually-hidden">Dateien zum Hochladen auswählen</label>
+          <input type="file" id="upload-files" name="files" multiple class="w-auto">
           <button class="btn btn-primary" type="submit">Hochladen</button>
+          <span class="muted">Ziel: <span class="mono">/${esc(current)}</span></span>
         </form>
-        <button class="btn mb" id="job-here">Auftrag aus diesem Ordner erstellen</button>
+        <button class="btn mb" type="button" id="job-here">Auftrag aus diesem Ordner erstellen</button>
         <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Typ</th><th>Größe</th><th>Geändert</th></tr></thead>
-          <tbody>
-          ${entries.map(en => `<tr class="clickable" data-path="${esc(en.path)}" data-type="${esc(en.type)}">
-            <td>${en.type === 'dir' ? '📁 ' : '📄 '}${esc(en.name)}</td>
-            <td>${esc(en.type)}</td>
+          <thead><tr><th scope="col">Name</th><th scope="col">Typ</th><th scope="col">Größe</th><th scope="col">Geändert</th></tr></thead>
+          <tbody id="browse-rows">
+          ${entries.map(en => `<tr${en.type === 'dir' ? ` class="clickable" tabindex="0" aria-label="Ordner ${esc(en.name)} öffnen"` : ''} data-path="${esc(en.path)}" data-type="${esc(en.type)}">
+            <td><span aria-hidden="true">${en.type === 'dir' ? '📁 ' : '📄 '}</span>${esc(en.name)}</td>
+            <td>${en.type === 'dir' ? 'Ordner' : 'Datei'}</td>
             <td>${en.type === 'file' ? fmtBytes(en.size) : ''}</td>
             <td>${fmtDate(en.modified_at)}</td>
           </tr>`).join('') || '<tr><td colspan="4" class="muted">Ordner ist leer.</td></tr>'}
@@ -369,60 +603,66 @@
         </table></div>
       </div>`);
 
-    $$('#view tbody tr[data-path]').forEach(tr => tr.addEventListener('click', () => {
-      if (tr.dataset.type === 'dir') { state.browsePath = tr.dataset.path; browse(el, tr.dataset.path); }
-    }));
+    const go = p => { state.browsePath = p; browse(el, p).catch(e => notify(e.message, 'error')); };
+    rowActivation($('#browse-rows', el), 'tr[data-type="dir"]', tr => go(tr.dataset.path));
+    $$('.crumb', el).forEach(a => a.addEventListener('click', ev => { ev.preventDefault(); go(a.dataset.path); }));
 
-    $('#upload-form').addEventListener('submit', async ev => {
+    $('#upload-form', el).addEventListener('submit', async ev => {
       ev.preventDefault();
-      const input = $('input[type=file]');
-      if (!input.files.length) return;
+      const input = $('#upload-files', el);
+      if (!input.files.length) { notify('Bitte mindestens eine Datei auswählen.', 'error'); input.focus(); return; }
       const fd = new FormData();
-      fd.append('path', path);
+      fd.append('path', current);
       for (const f of input.files) fd.append('files[]', f);
-      try { await api('/api/upload', { method: 'POST', body: fd }); notify('Hochgeladen.', 'success'); browse(el, path); }
-      catch (e) { notify(e.message, 'error'); }
+      await busy($('#upload-form button[type=submit]', el), async () => {
+        try {
+          const res = await api('/api/upload', { method: 'POST', body: fd });
+          const n = (res && res.uploaded && res.uploaded.length) || input.files.length;
+          notify(fmtNumber(n) + ' Datei(en) hochgeladen.', 'success');
+          go(current);
+        } catch (e) { notify(e.message, 'error'); }
+      });
     });
 
-    $('#job-here').addEventListener('click', () => openJobModal(path));
+    $('#job-here', el).addEventListener('click', () => openJobModal(current));
   }
 
   function buildCrumbs(path) {
     const parts = (path || '').split('/').filter(Boolean);
     let acc = '';
-    const items = ['<a href="#" class="crumb" data-path="">/ (root)</a>'];
-    parts.forEach(p => {
+    const items = ['<a href="#browse" class="crumb" data-path="">/ (Wurzel)</a>'];
+    parts.forEach((p, i) => {
       acc = acc ? acc + '/' + p : p;
-      items.push('<a href="#" class="crumb" data-path="' + esc(acc) + '">' + esc(p) + '</a>');
+      const last = i === parts.length - 1;
+      items.push('<a href="#browse" class="crumb" data-path="' + esc(acc) + '"' + (last ? ' aria-current="location"' : '') + '>' + esc(p) + '</a>');
     });
-    const html = items.join(' / ');
-    setTimeout(() => $$('#crumbs .crumb').forEach(a => a.addEventListener('click', ev => {
-      ev.preventDefault();
-      state.browsePath = a.dataset.path;
-      browse($('#view'), a.dataset.path);
-    })), 0);
-    return html;
+    return items.join('<span aria-hidden="true"> / </span>');
   }
 
   async function openJobModal(sourceDir) {
     const opts = await modelOptions('');
     openModal('Auftrag erstellen', `
-      <label>Name</label><input id="job-name" placeholder="z. B. Handbuch-Import">
-      <label>Quellordner (relativ zu ${esc('INPUT_ROOT')})</label>
-      <input id="job-src" class="mono" value="${esc(sourceDir || '')}" placeholder="/">
-      <div class="checkbox"><input type="checkbox" id="job-rec" checked> <span>Rekursiv durchsuchen</span></div>
-      <label>Embedding-Modell</label><select id="job-model">${opts}</select>
-      <div class="flex mt"><button class="btn btn-primary" id="job-create">Erstellen</button></div>`);
-    $('#job-create').addEventListener('click', async () => {
+      <form id="job-form" novalidate>
+        <label for="job-name">Name</label><input id="job-name" maxlength="255" placeholder="z. B. Handbuch-Import">
+        <label for="job-src">Quellordner (relativ zum Eingabeordner)</label>
+        <input id="job-src" class="mono" value="${esc(sourceDir || '')}" placeholder="/" maxlength="1024">
+        <div class="checkbox"><input type="checkbox" id="job-rec" checked> <label for="job-rec">Rekursiv durchsuchen</label></div>
+        <label for="job-model">Embedding-Modell</label><select id="job-model" required>${opts}</select>
+        <div class="flex mt"><button class="btn btn-primary" type="submit" id="job-create">Erstellen</button></div>
+      </form>`);
+    $('#job-form').addEventListener('submit', async ev => {
+      ev.preventDefault();
       const body = {
-        name: $('#job-name').value || 'Import ' + new Date().toLocaleString('de-DE'),
-        source_directory: $('#job-src').value || '',
+        name: $('#job-name').value.trim() || 'Import ' + new Date().toLocaleString('de-DE'),
+        source_directory: $('#job-src').value.trim(),
         recursive: $('#job-rec').checked,
         embedding_model: $('#job-model').value,
       };
-      if (!body.embedding_model) { notify('Bitte ein Modell wählen.', 'error'); return; }
-      try { await api('/api/jobs', { method: 'POST', body }); notify('Auftrag erstellt.', 'success'); closeModal(); navigate('jobs'); }
-      catch (e) { notify(e.message, 'error'); }
+      if (!body.embedding_model) { notify('Bitte ein Modell wählen.', 'error'); $('#job-model').focus(); return; }
+      await busy($('#job-create'), async () => {
+        try { await api('/api/jobs', { method: 'POST', body }); notify('Auftrag erstellt.', 'success'); closeModal(); location.hash = '#jobs'; navigate('jobs'); }
+        catch (e) { notify(e.message, 'error'); }
+      });
     });
   }
 
@@ -431,87 +671,115 @@
     const jobs = r.jobs || [];
     renderInto(el, `
       <div class="card">
-        <div class="flex mb"><button class="btn btn-primary" id="job-new">Neuer Auftrag</button></div>
+        <div class="flex mb"><button class="btn btn-primary" type="button" id="job-new">Neuer Auftrag</button></div>
         ${jobsTable(jobs)}
       </div>`);
-    $('#job-new').addEventListener('click', () => openJobModal(''));
-    $$('#view tr[data-job]').forEach(tr => tr.addEventListener('click', async () => {
-      const r2 = await api('/api/jobs/' + tr.dataset.job);
-      showJob(r2.job);
-    }));
+    $('#job-new', el).addEventListener('click', () => openJobModal(''));
+    rowActivation(el, 'tr[data-job]', tr => openJob(tr.dataset.job));
+  }
+
+  async function openJob(id) {
+    try {
+      const r = await api('/api/jobs/' + enc(id));
+      showJob(r.job);
+    } catch (e) { notify(e.message, 'error'); }
   }
 
   function showJob(j) {
-    openModal('Auftrag', `
+    const cancellable = ['RUNNING', 'CREATED', 'PENDING', 'PAUSED'].includes(String(j.status).toUpperCase());
+    openModal('Auftrag: ' + (j.name || ''), `
       <div class="grid cards mb">
         <div class="card stat"><div class="value">${esc(j.name)}</div><div class="label">Name</div></div>
         <div class="card stat"><div class="value">${statusBadge(j.status)}</div><div class="label">Status</div></div>
         <div class="card stat"><div class="value">${fmtNumber(j.documents_processed)}/${fmtNumber(j.documents_total)}</div><div class="label">Dokumente</div></div>
       </div>
-      <pre class="code">${esc(JSON.stringify(j, null, 2))}</pre>
-      <div class="flex mt">${['RUNNING','CREATED','PENDING','PAUSED'].includes(j.status)
-        ? '<button class="btn btn-danger" id="job-cancel">Abbrechen</button>' : ''}</div>`);
+      ${j.error_message ? `<p class="form-error">${esc(j.error_message)}</p>` : ''}
+      <details><summary>Rohdaten</summary><pre class="code">${esc(JSON.stringify(j, null, 2))}</pre></details>
+      <div class="flex mt">${cancellable ? '<button class="btn btn-danger" type="button" id="job-cancel">Auftrag abbrechen</button>' : ''}</div>`);
     const cancel = $('#job-cancel');
     if (cancel) cancel.addEventListener('click', async () => {
-      try { await api('/api/jobs/' + j.job_id + '/cancel', { method: 'POST' }); notify('Auftrag abgebrochen.', 'success'); closeModal(); navigate('jobs'); }
-      catch (e) { notify(e.message, 'error'); }
+      if (!confirm('Auftrag „' + j.name + '“ wirklich abbrechen?')) return;
+      await busy(cancel, async () => {
+        try { await api('/api/jobs/' + enc(j.job_id) + '/cancel', { method: 'POST' }); notify('Auftrag abgebrochen.', 'success'); closeModal(); navigate('jobs', true); }
+        catch (e) { notify(e.message, 'error'); }
+      });
     });
   }
 
   async function renderSearch(el) {
     renderInto(el, `
-      <div class="card">
-        <h2>Semantische Suche</h2>
-        <div class="flex">
-          <input id="q" class="grow" placeholder="Suchanfrage eingeben…">
-          <select id="q-limit" style="width:auto">
+      <section class="card" aria-labelledby="search-title">
+        <h2 id="search-title">Semantische Suche</h2>
+        <form id="q-form" class="flex wrap" role="search">
+          <label for="q" class="visually-hidden">Suchanfrage</label>
+          <input id="q" type="search" class="grow" placeholder="Suchanfrage eingeben…" maxlength="2000" required>
+          <label for="q-limit" class="visually-hidden">Anzahl Treffer</label>
+          <select id="q-limit" class="w-auto">
             <option value="5">5</option><option value="10" selected>10</option>
             <option value="20">20</option><option value="50">50</option>
           </select>
-          <button class="btn btn-primary" id="q-go">Suchen</button>
-        </div>
-        <div id="q-results" class="mt"></div>
-      </div>`);
-    $('#q-go').addEventListener('click', runSearch);
-    $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+          <button class="btn btn-primary" type="submit" id="q-go">Suchen</button>
+        </form>
+        <div id="q-results" class="mt" aria-live="polite"></div>
+      </section>`);
+    $('#q', el).focus();
+    $('#q-form', el).addEventListener('submit', ev => { ev.preventDefault(); busy($('#q-go', el), runSearch); });
+
     async function runSearch() {
-      $('#q-results').innerHTML = '<div class="spinner">Suche…</div>';
+      const out = $('#q-results', el);
+      const query = $('#q', el).value.trim();
+      if (!query) { out.innerHTML = '<p class="muted">Bitte einen Suchbegriff eingeben.</p>'; return; }
+      out.innerHTML = '<div class="spinner">Suche…</div>';
       try {
-        const r = await api('/api/search', { method: 'POST', body: { query: $('#q').value, limit: Number($('#q-limit').value) } });
+        const r = await api('/api/search', { method: 'POST', body: { query, limit: Number($('#q-limit', el).value) } });
         const results = r.results || [];
-        if (!results.length) { $('#q-results').innerHTML = '<p class="empty">Keine Treffer.</p>'; return; }
-        $('#q-results').innerHTML = `<div class="table-wrap"><table>
-          <thead><tr><th>#</th><th>Distanz</th><th>Dokument</th><th>Chunk</th></tr></thead>
-          <tbody>${results.map((h, i) => `<tr>
-            <td>${i + 1}</td>
-            <td class="mono">${Number(h.distance).toFixed(4)}</td>
-            <td class="mono">${esc(h.document_id || '')}</td>
-            <td>${fmtNumber(h.chunk_index)}</td>
-          </tr>`).join('')}</tbody>
-        </table></div>`;
-      } catch (e) { $('#q-results').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>'; }
+        if (!results.length) { out.innerHTML = '<p class="empty">Keine Treffer.</p>'; return; }
+        // UX: show filename, pages, text snippet and a download link instead of only the raw document ID.
+        out.innerHTML = `<p class="muted">${fmtNumber(results.length)} Treffer</p><ol class="hits">${results.map(h => {
+          const pages = h.page_start ? ('Seite ' + fmtNumber(h.page_start) + (h.page_end && h.page_end !== h.page_start ? '–' + fmtNumber(h.page_end) : '')) : '';
+          const text = String(h.text || '');
+          return `<li class="hit">
+            <div class="hit-head">
+              <strong>${esc(h.filename || h.document_id || 'Unbekannt')}</strong>
+              <span class="muted">${esc(pages)}</span>
+              <span class="muted">Chunk ${fmtNumber(h.chunk_index)}</span>
+              <span class="badge badge-gray" title="Distanz (kleiner = ähnlicher)">${Number(h.distance).toFixed(4)}</span>
+              ${h.document_id ? `<button class="btn btn-sm" type="button" data-open-doc="${esc(h.document_id)}">Details</button>` : ''}
+              ${h.download_endpoint ? `<a class="btn btn-sm" href="${esc(h.download_endpoint)}">Original</a>` : ''}
+            </div>
+            ${text ? `<p class="hit-text">${esc(text.slice(0, 500))}${text.length > 500 ? '…' : ''}</p>` : ''}
+          </li>`;
+        }).join('')}</ol>`;
+      } catch (e) { out.innerHTML = '<p class="form-error">Fehler: ' + esc(e.message) + '</p>'; }
     }
+    $('#q-results', el).addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-open-doc]');
+      if (b) showDocument(b.dataset.openDoc);
+    });
   }
 
   async function renderCollections(el) {
     try {
       const r = await api('/api/collections');
       const cols = r.collections || [];
-      renderInto(el, `<div class="card"><h2>Milvus-Kollektionen</h2>
+      renderInto(el, `<section class="card" aria-labelledby="col-title"><h2 id="col-title">Milvus-Kollektionen</h2>
         <div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr></thead>
           <tbody>${cols.map(c => `<tr><td class="mono">${esc(c)}</td>
-            <td><button class="btn btn-sm" data-col="${esc(c)}">Statistik</button></td></tr>`).join('')
-            || '<tr><td class="muted">Keine Kollektionen.</td></tr>'}</tbody>
-        </table></div></div>`);
-      $$('#view button[data-col]').forEach(b => b.addEventListener('click', async () => {
-        openModal('Kollektion', '<div class="spinner">Lade…</div>');
+            <td><button class="btn btn-sm" type="button" data-col="${esc(c)}">Statistik</button></td></tr>`).join('')
+            || '<tr><td colspan="2" class="muted">Keine Kollektionen.</td></tr>'}</tbody>
+        </table></div></section>`);
+      el.addEventListener('click', async ev => {
+        const b = ev.target.closest('button[data-col]');
+        if (!b) return;
+        openModal('Kollektion: ' + b.dataset.col, '<div class="spinner">Lade…</div>');
         try {
-          const s = await api('/api/collections/' + encodeURIComponent(b.dataset.col) + '/stats');
+          const s = await api('/api/collections/' + enc(b.dataset.col) + '/stats');
           $('#modal-body').innerHTML = '<pre class="code">' + esc(JSON.stringify(s, null, 2)) + '</pre>';
         } catch (e) { $('#modal-body').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>'; }
-      }));
+      });
     } catch (e) {
+      if (e.status === 401) throw e;
       renderInto(el, '<div class="card"><p class="muted">Milvus nicht erreichbar: ' + esc(e.message) + '</p></div>');
     }
   }
@@ -522,7 +790,6 @@
       api('/api/statistics/extensions'),
     ]);
     const d = stats.documents || {};
-    const j = stats.jobs || {};
     const t = stats.totals || {};
     const st = stats.storage || {};
     const rows = (ext.extensions || []).map(x =>
@@ -536,8 +803,8 @@
         <div class="card stat"><div class="value">${fmtNumber(d.failed)}</div><div class="label">Fehler</div></div>
         <div class="card stat"><div class="value">${fmtNumber(t.chunks)}</div><div class="label">Chunks</div></div>
       </div>
-      <div class="card mb">
-        <h2>Speicher</h2>
+      <section class="card mb" aria-labelledby="stat-storage">
+        <h2 id="stat-storage">Speicher</h2>
         <div class="grid cards">
           <div class="card stat"><div class="value">${fmtBytes(st.original_bytes)}</div><div class="label">Originaldaten</div></div>
           <div class="card stat"><div class="value">${fmtBytes(st.base64_bytes)}</div><div class="label">Base64 (MySQL)</div></div>
@@ -547,26 +814,28 @@
           <div class="card stat"><div class="value">${fmtBytes(st.total_bytes)}</div><div class="label">Gesamt (ohne Milvus)</div></div>
         </div>
         <p class="muted mt">Vektoren: ${fmtNumber(st.vectors ? st.vectors.total : 0)} gesamt, ${fmtNumber(st.vectors ? st.vectors.linked : 0)} verknüpft.</p>
-      </div>
-      <div class="card mb">
+      </section>
+      <section class="card mb" aria-labelledby="stat-integrity">
         <div class="flex">
-          <h2 style="margin:0">Integrität</h2>
-          <button class="btn btn-primary btn-sm" id="integrity-run">Prüfung ausführen</button>
+          <h2 id="stat-integrity" class="m-0 grow">Integrität</h2>
+          <button class="btn btn-primary btn-sm" type="button" id="integrity-run">Prüfung ausführen</button>
         </div>
-        <div id="integrity-result" class="mt"><p class="muted">Noch nicht geprüft.</p></div>
-      </div>
-      <div class="card"><h2>Dokumente nach Dateiendung</h2>
+        <div id="integrity-result" class="mt" aria-live="polite"><p class="muted">Noch nicht geprüft.</p></div>
+      </section>
+      <section class="card" aria-labelledby="stat-ext"><h2 id="stat-ext">Dokumente nach Dateiendung</h2>
         <div class="table-wrap"><table>
-          <thead><tr><th>Endung</th><th>Anzahl</th><th>Bytes</th></tr></thead>
+          <thead><tr><th scope="col">Endung</th><th scope="col">Anzahl</th><th scope="col">Bytes</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="3" class="muted">Keine Daten.</td></tr>'}</tbody>
-        </table></div></div>`);
+        </table></div></section>`);
 
-    $('#integrity-run').addEventListener('click', async () => {
-      $('#integrity-result').innerHTML = '<div class="spinner">Prüfe…</div>';
+    const runBtn = $('#integrity-run', el);
+    runBtn.addEventListener('click', () => busy(runBtn, async () => {
+      const out = $('#integrity-result', el);
+      out.innerHTML = '<div class="spinner">Prüfe… (kann bei vielen Dokumenten dauern)</div>';
       try {
         const r = await api('/api/integrity');
         const issues = (r.issues || []).map(i => `<li>${esc(i.type)}: ${esc(i.detail || '')}</li>`).join('');
-        $('#integrity-result').innerHTML = `
+        out.innerHTML = `
           <div class="grid cards">
             <div class="card stat"><div class="value">${fmtNumber(r.inconsistencies)}</div><div class="label">Inkonsistenzen</div></div>
             <div class="card stat"><div class="value">${fmtNumber(r.documents_without_blob)}</div><div class="label">Ohne Original</div></div>
@@ -574,10 +843,10 @@
             <div class="card stat"><div class="value">${fmtNumber(r.vectors_without_document)}</div><div class="label">Verwaiste Vektoren</div></div>
             <div class="card stat"><div class="value">${fmtNumber(r.documents_without_vectors)}</div><div class="label">Dokumente ohne Vektoren</div></div>
           </div>
-          ${issues ? '<h3>Details</h3><ul>' + issues + '</ul>' : ''}
+          ${issues ? '<h3>Details</h3><ul>' + issues + '</ul>' : '<p class="muted">Keine Auffälligkeiten.</p>'}
           <p class="muted">Milvus: ${r.milvus_available ? 'erreichbar' : 'nicht erreichbar'} · Vektoren gesamt: ${fmtNumber(r.vectors)}</p>`;
-      } catch (e) { $('#integrity-result').innerHTML = '<p class="muted">Fehler: ' + esc(e.message) + '</p>'; }
-    });
+      } catch (e) { out.innerHTML = '<p class="form-error">Fehler: ' + esc(e.message) + '</p>'; }
+    }));
   }
 
   async function renderExport(el) {
@@ -585,139 +854,204 @@
     const exports = r.exports || [];
     renderInto(el, `
       <div class="grid split">
-        <div class="card">
-          <h2>Exporte</h2>
-          <button class="btn btn-primary mb" id="export-create">Neuen Export erstellen</button>
+        <section class="card" aria-labelledby="exp-title">
+          <h2 id="exp-title">Exporte</h2>
+          <button class="btn btn-primary mb" type="button" id="export-create">Neuen Export erstellen</button>
           <div class="table-wrap"><table>
-            <thead><tr><th>Datei</th><th>Größe</th><th>Erstellt</th><th></th></tr></thead>
+            <thead><tr><th scope="col">Datei</th><th scope="col">Größe</th><th scope="col">Erstellt</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr></thead>
             <tbody>${exports.map(x => `<tr>
               <td class="mono">${esc(x.filename)}</td>
               <td>${fmtBytes(x.file_size)}</td>
               <td>${fmtDate(x.created_at)}</td>
-              <td><a class="btn btn-sm" href="/api/exports/${esc(x.export_id)}/download">Download</a></td>
+              <td><a class="btn btn-sm" href="/api/exports/${enc(x.export_id)}/download" aria-label="${esc(x.filename)} herunterladen">Download</a></td>
             </tr>`).join('') || '<tr><td colspan="4" class="muted">Keine Exporte.</td></tr>'}</tbody>
           </table></div>
-        </div>
-        <div class="card">
-          <h2>Import</h2>
+        </section>
+        <section class="card" aria-labelledby="imp-title">
+          <h2 id="imp-title">Import</h2>
           <p class="muted">Lade ein Export-Archiv (.tar.gz) hoch, um Dokumente, Originale, Chunks und Vektoren vollständig und ID-erhaltend wiederherzustellen – oder füge ein Legacy-Manifest (JSON) ein.</p>
-          <label>Export-Archiv (.tar.gz)</label>
+          <label for="import-archive">Export-Archiv (.tar.gz)</label>
           <input type="file" id="import-archive" accept=".tar.gz,.tgz,application/gzip">
-          <label>Konfliktstrategie</label>
+          <label for="import-strategy">Konfliktstrategie</label>
           <select id="import-strategy">
             <option value="skip">Überspringen (empfohlen)</option>
             <option value="overwrite">Überschreiben</option>
           </select>
-          <div class="flex mt"><button class="btn btn-primary" id="import-archive-go">Archiv importieren</button></div>
-          <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
-          <label>Manifest (JSON)</label>
+          <div class="flex mt"><button class="btn btn-primary" type="button" id="import-archive-go">Archiv importieren</button></div>
+          <hr class="divider">
+          <label for="import-manifest">Manifest (JSON)</label>
           <textarea id="import-manifest" class="mono" placeholder='{"documents":[…] }'></textarea>
-          <div class="flex mt"><button class="btn btn-primary" id="import-go">Manifest importieren</button></div>
-        </div>
+          <div class="flex mt"><button class="btn btn-primary" type="button" id="import-go">Manifest importieren</button></div>
+        </section>
       </div>`);
-    $('#export-create').addEventListener('click', async () => {
-      try { await api('/api/exports', { method: 'POST' }); notify('Export erstellt.', 'success'); navigate('export'); }
+    const createBtn = $('#export-create', el);
+    createBtn.addEventListener('click', () => busy(createBtn, async () => {
+      notify('Export wird erstellt – das kann einige Minuten dauern.', 'info');
+      try { await api('/api/exports', { method: 'POST' }); notify('Export erstellt.', 'success'); navigate('export', true); }
       catch (e) { notify(e.message, 'error'); }
-    });
-    $('#import-archive-go').addEventListener('click', async () => {
-      const input = $('#import-archive');
-      if (!input.files.length) { notify('Bitte eine .tar.gz-Datei auswählen.', 'error'); return; }
+    }));
+    const archiveBtn = $('#import-archive-go', el);
+    archiveBtn.addEventListener('click', async () => {
+      const input = $('#import-archive', el);
+      if (!input.files.length) { notify('Bitte eine .tar.gz-Datei auswählen.', 'error'); input.focus(); return; }
+      const strategy = $('#import-strategy', el).value;
+      // UX/safety: destructive strategy requires explicit confirmation.
+      if (strategy === 'overwrite' && !confirm('Vorhandene Dokumente mit gleicher ID werden überschrieben (inkl. Vektoren). Fortfahren?')) return;
       const fd = new FormData();
       fd.append('archive', input.files[0]);
-      fd.append('strategy', $('#import-strategy').value);
-      try {
-        const res = await api('/api/import', { method: 'POST', body: fd });
-        notify('Import abgeschlossen: ' + fmtNumber(res.imported) + ' importiert, ' + fmtNumber(res.reused || 0) + ' wiederverwendet, ' + fmtNumber(res.skipped || 0) + ' übersprungen.', 'success');
-      } catch (e) { notify(e.message, 'error'); }
+      fd.append('strategy', strategy);
+      await busy(archiveBtn, async () => {
+        try {
+          const res = await api('/api/import', { method: 'POST', body: fd });
+          notify('Import abgeschlossen: ' + fmtNumber(res.imported) + ' importiert, ' + fmtNumber(res.reused || 0) + ' wiederverwendet, ' + fmtNumber(res.skipped || 0) + ' übersprungen.', 'success');
+          input.value = '';
+        } catch (e) { notify(e.message, 'error'); }
+      });
     });
-    $('#import-go').addEventListener('click', async () => {
+    const manifestBtn = $('#import-go', el);
+    manifestBtn.addEventListener('click', async () => {
       let manifest;
-      try { manifest = JSON.parse($('#import-manifest').value); }
+      try { manifest = JSON.parse($('#import-manifest', el).value); }
       catch (e) { notify('Ungültiges JSON: ' + e.message, 'error'); return; }
-      try {
-        const res = await api('/api/import', { method: 'POST', body: { manifest } });
-        notify('Import abgeschlossen: ' + fmtNumber(res.imported) + ' importiert, ' + fmtNumber(res.skipped) + ' übersprungen.', 'success');
-      } catch (e) { notify(e.message, 'error'); }
+      await busy(manifestBtn, async () => {
+        try {
+          const res = await api('/api/import', { method: 'POST', body: { manifest } });
+          notify('Import abgeschlossen: ' + fmtNumber(res.imported) + ' importiert, ' + fmtNumber(res.skipped) + ' übersprungen.', 'success');
+        } catch (e) { notify(e.message, 'error'); }
+      });
     });
   }
 
   async function renderTls(el) {
     let status;
-    try { status = await api('/api/tls'); } catch (e) { status = { served: null, records: [] }; }
+    try { status = await api('/api/tls'); }
+    catch (e) { if (e.status === 401) throw e; status = { served: null, records: [] }; }
     const served = status.served;
     const records = status.records || [];
     renderInto(el, `
       <div class="grid split">
-        <div class="card">
-          <h2>Aktuell ausgeliefert</h2>
-          ${served ? `<div class="muted">CN: ${esc(JSON.stringify(served.subject))}</div>
+        <section class="card" aria-labelledby="tls-cur">
+          <h2 id="tls-cur">Aktuell ausgeliefert</h2>
+          ${served ? `<div class="muted">Subjekt: <span class="mono">${esc(JSON.stringify(served.subject))}</span></div>
             <div class="muted mt">Gültig bis: ${fmtDate(served.valid_to)}</div>` : '<p class="empty">Kein Zertifikat aktiv (Self-Signed-Fallback wird verwendet).</p>'}
           <h2 class="mt">Zertifikatsdatensätze</h2>
           <div class="table-wrap"><table>
-            <thead><tr><th>CN</th><th>Typ</th><th>Schlüssel</th><th>Aktiv</th><th></th></tr></thead>
+            <thead><tr><th scope="col">CN</th><th scope="col">Typ</th><th scope="col">Schlüssel</th><th scope="col">Aktiv</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr></thead>
             <tbody>${records.map(r => `<tr>
               <td class="mono">${esc(r.common_name)}</td>
               <td>${esc(r.kind)}</td>
               <td>${esc(r.key_type)}</td>
               <td>${r.active ? '<span class="badge badge-green">aktiv</span>' : ''}</td>
-              <td>${r.has_cert ? `<button class="btn btn-sm" data-act="${r.id}">Aktivieren</button>` : ''}</td>
+              <td>${r.has_cert && !r.active ? `<button class="btn btn-sm" type="button" data-act="${esc(r.id)}" data-cn="${esc(r.common_name)}">Aktivieren</button>` : ''}</td>
             </tr>`).join('') || '<tr><td colspan="5" class="muted">Keine Datensätze.</td></tr>'}</tbody>
           </table></div>
-        </div>
-        <div class="card">
-          <h2>CSR / Self-Signed erzeugen</h2>
-          <label>Common Name (CN)</label><input id="tls-cn" value="localhost">
-          <label>SAN (eine pro Zeile, z. B. DNS:example.com oder IP:192.168.1.10)</label>
+        </section>
+        <section class="card" aria-labelledby="tls-gen">
+          <h2 id="tls-gen">CSR / Self-Signed erzeugen</h2>
+          <label for="tls-cn">Common Name (CN)</label><input id="tls-cn" value="localhost" maxlength="64" required>
+          <label for="tls-san">SAN (eine pro Zeile, z. B. DNS:example.com oder IP:192.168.1.10)</label>
           <textarea id="tls-san">DNS:localhost</textarea>
-          <label>Schlüsseltyp</label>
+          <label for="tls-key">Schlüsseltyp</label>
           <select id="tls-key"><option value="rsa2048">RSA 2048</option><option value="rsa3072" selected>RSA 3072</option><option value="rsa4096">RSA 4096</option><option value="ec256">EC P-256</option><option value="ec384">EC P-384</option></select>
           <div class="flex mt">
-            <button class="btn" id="tls-csr">CSR erzeugen</button>
-            <button class="btn btn-primary" id="tls-self">Self-Signed erzeugen</button>
+            <button class="btn" type="button" id="tls-csr">CSR erzeugen</button>
+            <button class="btn btn-primary" type="button" id="tls-self">Self-Signed erzeugen</button>
           </div>
           <div id="tls-out" class="mt"></div>
           <h2 class="mt">Zertifikat importieren (PEM)</h2>
-          <textarea id="tls-import" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
-          <div class="flex mt"><button class="btn" id="tls-import-go">Importieren</button></div>
-        </div>
+          <label for="tls-import" class="visually-hidden">Zertifikat im PEM-Format</label>
+          <textarea id="tls-import" class="mono" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          <div class="flex mt"><button class="btn" type="button" id="tls-import-go">Importieren</button></div>
+        </section>
       </div>`);
-    const san = () => $('#tls-san').value.split('\n').map(s => s.trim()).filter(Boolean);
-    const doGen = async (endpoint) => {
+    const san = () => $('#tls-san', el).value.split('\n').map(s => s.trim()).filter(Boolean);
+    const doGen = (btn, endpoint) => busy(btn, async () => {
       try {
-        const r = await api(endpoint, { method: 'POST', body: { common_name: $('#tls-cn').value, san: san(), key_type: $('#tls-key').value } });
+        const r = await api(endpoint, { method: 'POST', body: { common_name: $('#tls-cn', el).value.trim(), san: san(), key_type: $('#tls-key', el).value } });
         const c = r.certificate || {};
-        $('#tls-out').innerHTML = '<pre class="code">' + esc(c.csr_pem || JSON.stringify(c, null, 2)) + '</pre>';
-        notify('Erzeugt.', 'success');
+        $('#tls-out', el).innerHTML = '<pre class="code">' + esc(c.csr_pem || JSON.stringify(c, null, 2)) + '</pre>';
+        notify(c.csr_pem ? 'CSR erzeugt.' : 'Self-Signed-Zertifikat erzeugt. Zum Ausliefern bitte aktivieren.', 'success');
+        if (!c.csr_pem) navigate('tls', true);
       } catch (e) { notify(e.message, 'error'); }
-    };
-    $('#tls-csr').addEventListener('click', () => doGen('/api/tls/csr'));
-    $('#tls-self').addEventListener('click', () => doGen('/api/tls/selfsigned'));
-    $('#tls-import-go').addEventListener('click', async () => {
-      try { await api('/api/tls/import', { method: 'POST', body: { cert_pem: $('#tls-import').value } }); notify('Importiert.', 'success'); navigate('tls'); }
-      catch (e) { notify(e.message, 'error'); }
     });
-    $$('#view button[data-act]').forEach(b => b.addEventListener('click', async () => {
-      try { await api('/api/tls/' + b.dataset.act + '/activate', { method: 'POST' }); notify('Zertifikat aktiviert (nginx lädt automatisch neu).', 'success'); navigate('tls'); }
+    $('#tls-csr', el).addEventListener('click', ev => doGen(ev.currentTarget, '/api/tls/csr'));
+    $('#tls-self', el).addEventListener('click', ev => doGen(ev.currentTarget, '/api/tls/selfsigned'));
+    const importBtn = $('#tls-import-go', el);
+    importBtn.addEventListener('click', () => busy(importBtn, async () => {
+      const pem = $('#tls-import', el).value.trim();
+      if (!pem) { notify('Bitte ein PEM-Zertifikat einfügen.', 'error'); return; }
+      try { await api('/api/tls/import', { method: 'POST', body: { cert_pem: pem } }); notify('Zertifikat importiert.', 'success'); navigate('tls', true); }
       catch (e) { notify(e.message, 'error'); }
     }));
+    el.addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-act]');
+      if (!b) return;
+      // Safety: activation replaces the certificate served by nginx.
+      if (!confirm('Zertifikat „' + b.dataset.cn + '“ aktivieren? nginx lädt das Zertifikat automatisch neu; Browser zeigen ggf. eine neue Zertifikatswarnung.')) return;
+      busy(b, async () => {
+        try { await api('/api/tls/' + enc(b.dataset.act) + '/activate', { method: 'POST' }); notify('Zertifikat aktiviert (nginx lädt automatisch neu).', 'success'); navigate('tls', true); }
+        catch (e) { notify(e.message, 'error'); }
+      });
+    });
   }
 
   async function renderSettings(el) {
     const r = await api('/api/settings');
     const settings = r.settings || {};
-    renderInto(el, `<div class="card"><h2>Einstellungen</h2>
-      <form id="settings-form">
-      ${Object.keys(settings).length
-        ? Object.keys(settings).map(k => `<label>${esc(k)}</label><input name="${esc(k)}" value="${esc(settings[k])}">`).join('')
-        : '<p class="empty">Keine Einstellungen.</p>'}
-      <div class="flex mt"><button class="btn btn-primary" type="submit">Speichern</button></div>
-      </form></div>`);
-    $('#settings-form').addEventListener('submit', async ev => {
+    const keys = Object.keys(settings);
+    renderInto(el, `
+      <div class="grid split">
+        <section class="card" aria-labelledby="set-title"><h2 id="set-title">Einstellungen</h2>
+          <form id="settings-form">
+          ${keys.length
+            ? keys.map((k, i) => `<label for="set-${i}">${esc(k)}</label><input id="set-${i}" name="${esc(k)}" value="${esc(settings[k])}" maxlength="4096">`).join('')
+            : '<p class="empty">Keine Einstellungen.</p>'}
+          ${keys.length ? '<div class="flex mt"><button class="btn btn-primary" type="submit">Speichern</button></div>' : ''}
+          </form>
+        </section>
+        <section class="card" aria-labelledby="pw-title"><h2 id="pw-title">Passwort ändern</h2>
+          <form id="password-form" novalidate>
+            <input type="text" name="username" autocomplete="username" value="${esc(state.user ? state.user.username : '')}" class="visually-hidden" tabindex="-1" aria-hidden="true" readonly>
+            <label for="pw-current">Aktuelles Passwort</label>
+            <input id="pw-current" type="password" autocomplete="current-password" required maxlength="1024">
+            <label for="pw-new">Neues Passwort</label>
+            <input id="pw-new" type="password" autocomplete="new-password" required minlength="12" maxlength="1024" aria-describedby="pw-hint">
+            <p id="pw-hint" class="muted">Mindestens 12 Zeichen, nicht gleich dem Benutzernamen.</p>
+            <label for="pw-repeat">Neues Passwort wiederholen</label>
+            <input id="pw-repeat" type="password" autocomplete="new-password" required maxlength="1024">
+            <p id="pw-error" class="form-error" role="alert"></p>
+            <div class="flex mt"><button class="btn btn-primary" type="submit">Passwort ändern</button></div>
+          </form>
+        </section>
+      </div>`);
+    const form = $('#settings-form', el);
+    form.addEventListener('submit', async ev => {
       ev.preventDefault();
       const values = {};
-      $$('#settings-form input').forEach(i => values[i.name] = i.value);
-      try { await api('/api/settings', { method: 'PUT', body: { settings: values } }); notify('Gespeichert.', 'success'); }
-      catch (e) { notify(e.message, 'error'); }
+      $$('input', form).forEach(i => { values[i.name] = i.value; });
+      await busy($('button[type=submit]', form), async () => {
+        try { await api('/api/settings', { method: 'PUT', body: { settings: values } }); notify('Einstellungen gespeichert.', 'success'); }
+        catch (e) { notify(e.message, 'error'); }
+      });
+    });
+
+    const pwForm = $('#password-form', el);
+    pwForm.addEventListener('submit', async ev => {
+      ev.preventDefault();
+      const err = $('#pw-error', el);
+      const current = $('#pw-current', el).value;
+      const next = $('#pw-new', el).value;
+      err.textContent = '';
+      if (!current || !next) { err.textContent = 'Bitte alle Felder ausfüllen.'; return; }
+      if (next.length < 12) { err.textContent = 'Das neue Passwort muss mindestens 12 Zeichen lang sein.'; return; }
+      if (next !== $('#pw-repeat', el).value) { err.textContent = 'Die neuen Passwörter stimmen nicht überein.'; return; }
+      await busy($('button[type=submit]', pwForm), async () => {
+        try {
+          await api('/api/auth/password', { method: 'POST', body: { current_password: current, new_password: next } });
+          pwForm.reset();
+          notify('Passwort geändert.', 'success');
+        } catch (e) { err.textContent = e.message; }
+      });
     });
   }
 
@@ -727,97 +1061,121 @@
     ]);
     const c = health.checks || {};
     const modelsList = models.models || [];
+    const app = info.app || {};
+    const php = info.php || {};
     renderInto(el, `
       <div class="grid cards mb">
-        <div class="card stat"><div class="value">${esc(info.app.version)}</div><div class="label">App-Version</div></div>
-        <div class="card stat"><div class="value">${esc(info.php.version)}</div><div class="label">PHP</div></div>
-        <div class="card stat"><div class="value">${esc(info.app.timezone)}</div><div class="label">Zeitzone</div></div>
-        <div class="card stat"><div class="value">${health.status === 'ok' ? 'OK' : 'Degraded'}</div><div class="label">Gesamtzustand</div></div>
+        <div class="card stat"><div class="value">${esc(app.version)}</div><div class="label">App-Version</div></div>
+        <div class="card stat"><div class="value">${esc(php.version)}</div><div class="label">PHP</div></div>
+        <div class="card stat"><div class="value">${esc(app.timezone)}</div><div class="label">Zeitzone</div></div>
+        <div class="card stat"><div class="value">${health.status === 'ok' ? 'OK' : 'Eingeschränkt'}</div><div class="label">Gesamtzustand</div></div>
       </div>
       <div class="grid split mb">
-        <div class="card">
-          <h2>Dienste</h2>
+        <section class="card" aria-labelledby="sys-svc">
+          <h2 id="sys-svc">Dienste</h2>
           <div class="table-wrap"><table>
             <tbody>
-              <tr><td>Datenbank</td><td>${badgeForHealth(c.database)}</td></tr>
-              <tr><td>Embedding</td><td>${badgeForHealth(c.embedding)}</td></tr>
-              <tr><td>Converter</td><td>${badgeForHealth(c.converter)}</td></tr>
-              <tr><td>Milvus</td><td>${badgeForHealth(c.milvus)}</td></tr>
+              <tr><th scope="row">Datenbank</th><td>${badgeForHealth(c.database)}</td></tr>
+              <tr><th scope="row">Embedding</th><td>${badgeForHealth(c.embedding)}</td></tr>
+              <tr><th scope="row">Converter</th><td>${badgeForHealth(c.converter)}</td></tr>
+              <tr><th scope="row">Milvus</th><td>${badgeForHealth(c.milvus)}</td></tr>
             </tbody></table></div>
-        </div>
-        <div class="card">
-          <h2>Speicherpfade</h2>
+        </section>
+        <section class="card" aria-labelledby="sys-paths">
+          <h2 id="sys-paths">Speicherpfade</h2>
           <pre class="code">${esc(JSON.stringify(info.storage, null, 2))}</pre>
-        </div>
+        </section>
       </div>
-      <div class="card mb">
-        <div class="flex"><h2 style="margin:0" class="grow">Embedding-Modelle</h2>
-          <button class="btn" id="models-sync">Synchronisieren</button></div>
+      <section class="card mb" aria-labelledby="sys-models">
+        <div class="flex"><h2 id="sys-models" class="m-0 grow">Embedding-Modelle</h2>
+          <button class="btn" type="button" id="models-sync">Synchronisieren</button></div>
         <div class="table-wrap mt"><table>
-          <thead><tr><th>Name</th><th>Dimension</th><th>Max. Tokens</th><th>Metrik</th><th>Aktiv</th><th></th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col">Dimension</th><th scope="col">Max. Tokens</th><th scope="col">Metrik</th><th scope="col">Aktiv</th><th scope="col"><span class="visually-hidden">Aktionen</span></th></tr></thead>
           <tbody>${modelsList.map(m => `<tr>
             <td class="mono">${esc(m.name)}</td>
             <td>${fmtNumber(m.dimension)}</td>
             <td>${fmtNumber(m.max_input_tokens)}</td>
             <td>${esc(m.distance_metric)}</td>
             <td>${m.active ? '<span class="badge badge-green">aktiv</span>' : ''}</td>
-            <td>${m.active ? '' : `<button class="btn btn-sm" data-model="${esc(m.name)}">Aktivieren</button>`}</td>
+            <td>${m.active ? '' : `<button class="btn btn-sm" type="button" data-model="${esc(m.name)}">Aktivieren</button>`}</td>
           </tr>`).join('') || '<tr><td colspan="6" class="muted">Keine Modelle synchronisiert.</td></tr>'}</tbody>
         </table></div>
-      </div>
-      <div class="card">
-        <h2>System-Metriken</h2>
+      </section>
+      <section class="card" aria-labelledby="sys-metrics">
+        <h2 id="sys-metrics">System-Metriken</h2>
         <div class="table-wrap"><table>
-          <thead><tr><th>Service</th><th>Metrik</th><th>Wert</th><th>Zeitpunkt</th></tr></thead>
+          <thead><tr><th scope="col">Service</th><th scope="col">Metrik</th><th scope="col">Wert</th><th scope="col">Zeitpunkt</th></tr></thead>
           <tbody>${(metrics.metrics || []).map(m => `<tr>
             <td>${esc(m.service)}</td><td>${esc(m.metric)}</td>
             <td>${Number(m.value).toFixed(2)}</td><td>${fmtDate(m.recorded_at)}</td>
           </tr>`).join('') || '<tr><td colspan="4" class="muted">Keine Metriken.</td></tr>'}</tbody>
         </table></div>
-      </div>`);
-    $('#models-sync').addEventListener('click', async () => {
-      try { const r = await api('/api/models/sync', { method: 'POST' }); notify(fmtNumber(r.synced) + ' Modelle synchronisiert.', 'success'); navigate('system'); }
-      catch (e) { notify(e.message, 'error'); }
-    });
-    $$('#view button[data-model]').forEach(b => b.addEventListener('click', async () => {
-      try { await api('/api/models/activate', { method: 'POST', body: { name: b.dataset.model } }); notify('Modell aktiviert.', 'success'); navigate('system'); }
+      </section>`);
+    const syncBtn = $('#models-sync', el);
+    syncBtn.addEventListener('click', () => busy(syncBtn, async () => {
+      try { const r = await api('/api/models/sync', { method: 'POST' }); notify(fmtNumber(r.synced) + ' Modelle synchronisiert.', 'success'); navigate('system', true); }
       catch (e) { notify(e.message, 'error'); }
     }));
+    el.addEventListener('click', ev => {
+      const b = ev.target.closest('button[data-model]');
+      if (!b) return;
+      busy(b, async () => {
+        try { await api('/api/models/activate', { method: 'POST', body: { name: b.dataset.model } }); notify('Modell aktiviert.', 'success'); navigate('system', true); }
+        catch (e) { notify(e.message, 'error'); }
+      });
+    });
   }
 
   /* ---------- health polling ---------- */
   async function pollHealth() {
+    if (!state.user || document.hidden) return;
     try {
       const h = await api('/api/health');
-      state.health = h;
-      const dot = $('#health-dot');
-      const label = $('#health-label');
-      dot.className = 'dot ' + (h.status === 'ok' ? 'dot-ok' : 'dot-degraded');
-      label.textContent = h.status === 'ok' ? 'System bereit' : 'Eingeschränkt';
+      $('#health-dot').className = 'dot ' + (h.status === 'ok' ? 'dot-ok' : 'dot-degraded');
+      $('#health-label').textContent = h.status === 'ok' ? 'System bereit' : 'Eingeschränkt';
     } catch (e) {
+      if (e.status === 401) return;
       $('#health-dot').className = 'dot dot-error';
       $('#health-label').textContent = 'Nicht erreichbar';
     }
   }
 
+  function startPolling() {
+    stopPolling();
+    pollHealth();
+    state.pollTimer = setInterval(pollHealth, 15000);
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+
   /* ---------- init ---------- */
   async function init() {
-    $('#refresh-btn').addEventListener('click', () => navigate(state.currentView));
+    $('#login-form').addEventListener('submit', onLogin);
+    $('#logout-btn').addEventListener('click', onLogout);
+    $('#refresh-btn').addEventListener('click', () => navigate(state.currentView, true));
     $('#modal-close').addEventListener('click', closeModal);
     $('#modal-backdrop').addEventListener('click', ev => { if (ev.target === $('#modal-backdrop')) closeModal(); });
-    $$('#nav a').forEach(a => a.addEventListener('click', ev => {
-      ev.preventDefault();
-      location.hash = '#' + a.dataset.view;
-    }));
+    document.addEventListener('keydown', modalKeydown);
+    $('#nav-toggle').addEventListener('click', () => {
+      const open = $('#nav').classList.toggle('open');
+      $('#nav-toggle').setAttribute('aria-expanded', String(open));
+    });
     window.addEventListener('hashchange', () => {
       const v = (location.hash || '#dashboard').slice(1);
-      if (VIEWS[v]) navigate(v);
+      if (VIEWS[v] && state.user) navigate(v);
     });
-    try { const r = await api('/api/csrf'); state.csrf = r.csrf_token || null; } catch (e) { /* csrf optional */ }
-    const initial = (location.hash || '#dashboard').slice(1);
-    navigate(VIEWS[initial] ? initial : 'dashboard');
-    await pollHealth();
-    setInterval(pollHealth, 15000);
+
+    let me = null;
+    try { me = await api('/api/auth/me'); } catch (e) { me = null; }
+    if (me && me.authenticated) {
+      state.user = me.user;
+      showApp();
+    } else {
+      showLogin(me ? '' : 'Server nicht erreichbar. Bitte später erneut versuchen.');
+    }
   }
 
   document.addEventListener('DOMContentLoaded', init);

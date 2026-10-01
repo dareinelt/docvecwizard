@@ -1,12 +1,17 @@
 #!/bin/sh
-# Generate a fallback self-signed certificate when none is present, keep the
-# shared SSL directory world-writable so the PHP `app` (uid 10003) can publish
-# activated certificates there, and reload nginx when the served cert changes.
+# Generate a fallback self-signed certificate when none is present, hand the
+# SSL directory to the PHP `app` user (uid 10003) so it can publish activated
+# certificates there, and reload nginx when the served cert changes.
 set -e
 
 SSL_DIR=/etc/nginx/ssl
+APP_UID="${APP_UID:-10003}"
 mkdir -p "$SSL_DIR"
-chmod 0777 "$SSL_DIR"
+# SECURITY FIX: was chmod 0777 (+ key.pem 0644) - the private key was readable
+# and replaceable by every user/container sharing the volume. The nginx
+# master process runs as root and can read it regardless of ownership.
+chown "$APP_UID:$APP_UID" "$SSL_DIR" 2>/dev/null || true
+chmod 0700 "$SSL_DIR"
 
 entry_for() {
     case "$1" in
@@ -31,14 +36,20 @@ CN="$(echo "${APP_HOSTNAMES:-localhost}" | tr ',' ' ' | awk '{print $1}')"
 
 if [ ! -f "$SSL_DIR/cert.pem" ] || [ ! -f "$SSL_DIR/key.pem" ]; then
     SAN="$(build_san)"
+    umask 077
     openssl req -x509 -newkey rsa:2048 -sha256 -nodes \
         -keyout "$SSL_DIR/key.pem" \
         -out "$SSL_DIR/cert.pem" \
         -days 3650 \
         -subj "/CN=${CN}" \
         -addext "subjectAltName=${SAN}" >/dev/null 2>&1
-    chmod 0644 "$SSL_DIR/cert.pem" "$SSL_DIR/key.pem"
+    umask 022
+    chmod 0600 "$SSL_DIR/key.pem"
+    chmod 0644 "$SSL_DIR/cert.pem"
+    chown "$APP_UID:$APP_UID" "$SSL_DIR/cert.pem" "$SSL_DIR/key.pem" 2>/dev/null || true
 fi
+# Tighten keys left over from older versions (were 0644).
+[ -f "$SSL_DIR/key.pem" ] && chmod 0600 "$SSL_DIR/key.pem"
 
 # Reload nginx when the served certificate is replaced (TLS activation).
 (

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Core\Db;
+use App\Core\Logger;
+use App\Core\Uuid;
 
 /**
  * Version-aware document access. `document_id` is the stable logical identity
@@ -26,9 +28,11 @@ final class DocumentService
             $params[] = $jobId;
         }
         if ($search !== '') {
+            // Escape LIKE wildcards so the search term is matched literally.
+            $like = '%' . addcslashes($search, '%_\\') . '%';
             $sql .= ' AND (d.filename LIKE ? OR d.relative_path LIKE ?)';
-            $params[] = '%' . $search . '%';
-            $params[] = '%' . $search . '%';
+            $params[] = $like;
+            $params[] = $like;
         }
         $sql .= ' ORDER BY d.id DESC LIMIT ? OFFSET ?';
         $params[] = $limit;
@@ -203,7 +207,60 @@ final class DocumentService
             Db::execute('DELETE FROM documents WHERE document_id = ?', [$documentId]);
         });
 
+        // Remove vectors from Milvus as well. MySQL is authoritative, so a
+        // Milvus failure is logged (and shows up in the integrity check) but
+        // does not undo the deletion. The id is a validated UUID taken from
+        // our own DB row, so it is safe inside the filter expression.
+        if (!empty($doc['embedding_model']) && Uuid::isValid((string) $doc['document_id'])) {
+            try {
+                (new MilvusClient())->deleteByFilter(
+                    MilvusClient::collectionFor((string) $doc['embedding_model']),
+                    sprintf('document_id == "%s"', $doc['document_id'])
+                );
+            } catch (\Throwable $e) {
+                Logger::channel('documents')->warning('Milvus cleanup failed', [
+                    'document_id' => $doc['document_id'],
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+        Audit::record('document.delete', 'document', $documentId);
+
         return $doc;
+    }
+
+    /** @return array<string,mixed>|null */
+    public function vectorById(string $vectorId): ?array
+    {
+        return Db::fetchOne(
+            'SELECT c.vector_id, c.chunk_id, c.chunk_index, c.page_start, c.page_end, c.text_length, c.token_count, d.document_id, d.document_version_id
+             FROM document_chunks c JOIN documents d ON d.id = c.document_id
+             WHERE c.vector_id = ? LIMIT 1',
+            [$vectorId]
+        );
+    }
+
+    /** @return array<string,mixed>|null */
+    public function chunkById(string $chunkId): ?array
+    {
+        return Db::fetchOne(
+            'SELECT c.chunk_id, c.vector_id, c.chunk_index, c.page_start, c.page_end, c.text_length, c.token_count, c.text,
+                                d.document_id, d.document_version_id
+             FROM document_chunks c JOIN documents d ON d.id = c.document_id
+             WHERE c.chunk_id = ? LIMIT 1',
+            [$chunkId]
+        );
+    }
+
+    /** Source metadata without the (potentially huge) Base64 payload. */
+    public function sourceSummary(string $documentVersionId): ?array
+    {
+        $source = $this->source($documentVersionId);
+        if ($source !== null) {
+            unset($source['base64']);
+        }
+
+        return $source;
     }
 
     /** @return array{total:int,versions:int,processed:int,failed:int,pending:int,multi_version:int} */

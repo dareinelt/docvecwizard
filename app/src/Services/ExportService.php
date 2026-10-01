@@ -219,7 +219,7 @@ final class ExportService
         if ($row === null) {
             return null;
         }
-        $path = $this->exportRoot() . '/' . $row['filename'];
+        $path = $this->exportRoot() . '/' . basename((string) $row['filename']);
 
         return is_file($path) ? $path : null;
     }
@@ -509,16 +509,49 @@ final class ExportService
         // the archive is always read fresh from disk.
         $copy = $this->exportRoot() . '/.archive_' . Uuid::v4() . '.tar.gz';
         if (!copy($archive, $copy)) {
+            $this->removeTree($tmp);
             throw new \RuntimeException('Failed to stage archive for extraction');
         }
         try {
-            $phar = new \PharData($copy);
+            try {
+                $phar = new \PharData($copy);
+            } catch (\UnexpectedValueException) {
+                throw new \InvalidArgumentException('Ungültiges oder beschädigtes Archiv (erwartet: .tar.gz-Export).');
+            }
+            // SECURITY FIX: inspect the archive before extracting it. Uploaded
+            // archives are untrusted: limit the entry count and the total
+            // uncompressed size (decompression bomb) and reject unsafe paths.
+            $this->assertSafeArchive($phar, $copy);
             $phar->extractTo($tmp, null, true);
+        } catch (\Throwable $e) {
+            $this->removeTree($tmp);
+            throw $e;
         } finally {
             @unlink($copy);
         }
 
         return $tmp;
+    }
+
+    private function assertSafeArchive(\PharData $phar, string $archivePath): void
+    {
+        $maxEntries = max(1, Config::int('IMPORT_MAX_ENTRIES', 200000));
+        $maxBytes = max(1, Config::int('IMPORT_MAX_BYTES', 10 * 1024 * 1024 * 1024));
+        $prefix = 'phar://' . str_replace('\\', '/', $archivePath);
+        $entries = 0;
+        $bytes = 0;
+        foreach (new \RecursiveIteratorIterator($phar) as $file) {
+            /** @var \PharFileInfo $file */
+            $entries++;
+            $bytes += (int) $file->getSize();
+            $relative = ltrim(substr(str_replace('\\', '/', $file->getPathname()), strlen($prefix)), '/');
+            if ($relative === '' || str_contains($relative, '..') || str_contains($relative, "\0") || str_starts_with($relative, '/')) {
+                throw new \InvalidArgumentException('Archive contains an unsafe path');
+            }
+            if ($entries > $maxEntries || $bytes > $maxBytes) {
+                throw new \InvalidArgumentException('Archive exceeds the configured import limits');
+            }
+        }
     }
 
     /**
@@ -549,6 +582,12 @@ final class ExportService
             }
             $documentId = (string) ($metadata['document_id'] ?? $entry);
             $versionId = (string) ($metadata['document_version_id'] ?? $entry);
+            // SECURITY FIX: IDs are interpolated into Milvus filter expressions
+            // and must therefore be strictly validated.
+            if (!Uuid::isValid($documentId) || !Uuid::isValid($versionId)) {
+                $result['skipped']++;
+                continue;
+            }
             $hash = trim((string) @file_get_contents($dir . '/checksum.sha256'));
             $base64 = (string) @file_get_contents($dir . '/original.b64');
             $chunks = json_decode((string) @file_get_contents($dir . '/chunks.json'), true);
@@ -556,7 +595,7 @@ final class ExportService
             $vectors = json_decode((string) @file_get_contents($dir . '/vectors.json'), true);
             $vectors = is_array($vectors) ? $vectors : [];
 
-            $existing = Db::fetchOne('SELECT id, file_hash FROM documents WHERE document_version_id = ? LIMIT 1', [$versionId]);
+            $existing = Db::fetchOne('SELECT id, file_hash, embedding_model FROM documents WHERE document_version_id = ? LIMIT 1', [$versionId]);
             if ($existing !== null) {
                 if ($existing['file_hash'] === $hash) {
                     $result['reused']++;
@@ -570,6 +609,21 @@ final class ExportService
                     Db::execute('DELETE FROM document_blobs WHERE document_version_id = ?', [$versionId]);
                     Db::execute('DELETE FROM documents WHERE document_version_id = ?', [$versionId]);
                 });
+                // FIX: the old vectors of the overwritten version used to stay
+                // in Milvus (orphans that still showed up in search results).
+                if ((string) $existing['embedding_model'] !== '') {
+                    try {
+                        $milvus->deleteByFilter(
+                            MilvusClient::collectionFor((string) $existing['embedding_model']),
+                            sprintf('document_version_id == "%s"', $versionId)
+                        );
+                    } catch (\Throwable $e) {
+                        Logger::channel('import')->warning('Milvus cleanup of overwritten version failed', [
+                            'document_version_id' => $versionId,
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
+                }
                 $result['overwritten']++;
             }
 
@@ -611,7 +665,7 @@ final class ExportService
             $documentId = (string) ($doc['document_id'] ?? '');
             $versionId = (string) ($doc['document_version_id'] ?? $documentId);
             $hash = (string) ($doc['file_hash'] ?? '');
-            if ($documentId === '' || $hash === '') {
+            if (!Uuid::isValid($documentId) || !Uuid::isValid($versionId) || $hash === '') {
                 $skipped++;
                 continue;
             }
@@ -635,6 +689,14 @@ final class ExportService
     private function importVersion(array $meta, string $documentId, string $versionId, string $hash, string $base64, array $chunks, array $vectors, MilvusClient $milvus): void
     {
         Db::transaction(function () use ($meta, $documentId, $versionId, $hash, $base64, $chunks): void {
+            // FIX: is_current was hard-coded to 1, so importing several
+            // versions of one document produced multiple "current" rows.
+            $isCurrent = (int) ($meta['is_current'] ?? 1) === 1 ? 1 : 0;
+            if ($isCurrent === 1) {
+                Db::execute('UPDATE documents SET is_current = 0 WHERE document_id = ?', [$documentId]);
+            } elseif (Db::fetchOne('SELECT id FROM documents WHERE document_id = ? AND is_current = 1 LIMIT 1', [$documentId]) === null) {
+                $isCurrent = 1;
+            }
             Db::execute(
                 'INSERT INTO document_blobs (document_id, document_version_id, encoding, mime_type, original_filename, file_size, sha256, base64_data)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
@@ -663,7 +725,7 @@ final class ExportService
                     $documentId,
                     $versionId,
                     (int) ($meta['version'] ?? 1),
-                    1,
+                    $isCurrent,
                     null,
                     (string) ($meta['source_path'] ?? ''),
                     (string) ($meta['relative_path'] ?? ''),
@@ -673,9 +735,10 @@ final class ExportService
                     (int) ($meta['file_size'] ?? 0),
                     $hash,
                     $blobId,
-                    $this->nullableDate($meta['created_at']),
-                    $this->nullableDate($meta['modified_at']),
-                    $this->nullableDate($meta['indexed_at']),
+                    // FIX: undefined-index warnings for legacy manifests without dates.
+                    $this->nullableDate($meta['created_at'] ?? null),
+                    $this->nullableDate($meta['modified_at'] ?? null),
+                    $this->nullableDate($meta['indexed_at'] ?? null),
                     (int) ($meta['page_count'] ?? 0),
                     (int) ($meta['character_count'] ?? 0),
                     (int) ($meta['word_count'] ?? 0),

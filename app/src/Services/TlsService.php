@@ -27,9 +27,58 @@ final class TlsService
         $this->store = rtrim(Config::string('TLS_STORE', '/srv/ssl'), '/');
     }
 
+    public const MAX_PEM_BYTES = 65536;
+    public const MAX_SAN_ENTRIES = 50;
+
+    /**
+     * SECURITY FIX: previously derived from SESSION_SECRET without any
+     * strength check (an empty secret produced a well-known key). Now refuses
+     * to operate with a missing/placeholder/short secret.
+     */
     private function encryptionKey(): string
     {
-        return hash('sha256', Config::string('SESSION_SECRET', ''), true);
+        return hash('sha256', Config::secret('SESSION_SECRET'), true);
+    }
+
+    /**
+     * SECURITY FIX: Common name and SAN entries were written verbatim into an
+     * OpenSSL config file. A newline in a SAN value allowed injecting arbitrary
+     * config directives (e.g. ".include /etc/..."). Values are now validated
+     * against strict allow-lists before they reach OpenSSL.
+     *
+     * @param array<mixed> $san
+     * @return array{0:string,1:list<string>}
+     */
+    public static function validateSubject(string $commonName, array $san): array
+    {
+        $commonName = trim($commonName);
+        if ($commonName === '' || strlen($commonName) > 64 || preg_match('/^[A-Za-z0-9*][A-Za-z0-9*._-]*$/D', $commonName) !== 1) {
+            throw new \InvalidArgumentException('Ungültiger Common Name (erlaubt: Hostname oder IP-Adresse, max. 64 Zeichen).');
+        }
+        if (count($san) > self::MAX_SAN_ENTRIES) {
+            throw new \InvalidArgumentException(sprintf('Maximal %d SAN-Einträge erlaubt.', self::MAX_SAN_ENTRIES));
+        }
+        $clean = [];
+        foreach ($san as $entry) {
+            if (!is_string($entry)) {
+                throw new \InvalidArgumentException('SAN-Einträge müssen Zeichenketten sein.');
+            }
+            $entry = trim($entry);
+            if ($entry === '') {
+                continue;
+            }
+            if (preg_match('/^DNS:([A-Za-z0-9*][A-Za-z0-9*.-]{0,252})$/D', $entry, $m) === 1) {
+                $clean[] = 'DNS:' . $m[1];
+                continue;
+            }
+            if (preg_match('/^IP:(.+)$/D', $entry, $m) === 1 && filter_var($m[1], FILTER_VALIDATE_IP) !== false) {
+                $clean[] = 'IP:' . $m[1];
+                continue;
+            }
+            throw new \InvalidArgumentException('Ungültiger SAN-Eintrag (Format "DNS:host.example" oder "IP:192.0.2.1").');
+        }
+
+        return [$commonName, array_values(array_unique($clean))];
     }
 
     public function encryptPrivateKey(string $pem): string
@@ -63,13 +112,22 @@ final class TlsService
         if (!in_array($keyType, self::KEY_TYPES, true)) {
             throw new \InvalidArgumentException('Unsupported key type: ' . $keyType);
         }
+        [$commonName, $san] = self::validateSubject($commonName, $san);
         $config = $this->opensslConfig($keyType);
         $key = openssl_pkey_new($config);
         if ($key === false) {
             throw new \RuntimeException('Failed to generate private key: ' . $this->opensslError());
         }
         $dn = ['commonName' => $commonName];
-        $csr = openssl_csr_new($dn, $key, ['digest_alg' => 'sha256', 'config' => $this->csrConfig($san)]);
+        if ($san === []) {
+            // FIX: the bundled default config added "localhost" as SAN to every CSR.
+            $san = [(filter_var($commonName, FILTER_VALIDATE_IP) !== false ? 'IP:' : 'DNS:') . $commonName];
+        }
+        $csr = $this->withCsrConfig($san, fn (string $cnf) => openssl_csr_new($dn, $key, [
+            'digest_alg' => 'sha256',
+            'config' => $cnf,
+            'req_extensions' => 'v3_req',
+        ]));
         if ($csr === false) {
             throw new \RuntimeException('Failed to generate CSR: ' . $this->opensslError());
         }
@@ -86,6 +144,7 @@ final class TlsService
     /** @return array<string,mixed> */
     public function createCsr(string $commonName, array $san = [], string $keyType = 'rsa3072'): array
     {
+        [$commonName, $san] = self::validateSubject($commonName, $san);
         $generated = $this->generateKeyAndCsr($commonName, $san, $keyType);
         Db::execute(
             'INSERT INTO tls_certificates (kind, common_name, san, key_type, private_key_enc, csr_pem)
@@ -107,6 +166,7 @@ final class TlsService
     /** @return array<string,mixed> */
     public function generateSelfSigned(string $commonName, array $san = [], string $keyType = 'rsa3072', int $days = 825): array
     {
+        [$commonName, $san] = self::validateSubject($commonName, $san);
         $generated = $this->generateKeyAndCsr($commonName, $san, $keyType);
         $privateKey = $this->decryptPrivateKey($generated['private_key_enc']);
         $key = openssl_pkey_get_private($privateKey);
@@ -114,8 +174,13 @@ final class TlsService
             throw new \RuntimeException('Failed to load private key');
         }
         $altNames = $san === [] ? ['DNS:localhost', 'IP:127.0.0.1'] : $san;
-        $csrConfig = $this->csrConfig($altNames);
-        $cert = openssl_csr_sign($generated['csr_pem'], null, $key, $days, ['digest_alg' => 'sha256', 'config' => $csrConfig]);
+        // FIX: x509_extensions is now set so the SAN actually ends up in the
+        // self-signed certificate (browsers ignore the CN).
+        $cert = $this->withCsrConfig($altNames, fn (string $cnf) => openssl_csr_sign($generated['csr_pem'], null, $key, $days, [
+            'digest_alg' => 'sha256',
+            'config' => $cnf,
+            'x509_extensions' => 'v3_req',
+        ]));
         if ($cert === false) {
             throw new \RuntimeException('Failed to sign certificate: ' . $this->opensslError());
         }
@@ -155,6 +220,14 @@ final class TlsService
      */
     public function importCert(string $certPem): array
     {
+        $certPem = trim($certPem) . "\n";
+        if (strlen($certPem) > self::MAX_PEM_BYTES || !str_contains($certPem, '-----BEGIN CERTIFICATE-----')) {
+            throw new \InvalidArgumentException('Invalid certificate PEM');
+        }
+        if (str_contains($certPem, 'PRIVATE KEY')) {
+            // Never accept (and store in plain text) a private key pasted by mistake.
+            throw new \InvalidArgumentException('The PEM must not contain a private key');
+        }
         $certParsed = openssl_x509_parse($certPem);
         if ($certParsed === false) {
             throw new \InvalidArgumentException('Invalid certificate PEM');
@@ -220,14 +293,32 @@ final class TlsService
         if (!is_dir($this->store)) {
             @mkdir($this->store, 0700, true);
         }
-        if (file_put_contents($this->store . '/cert.pem', $certPem) === false) {
-            throw new \RuntimeException('Cannot write cert.pem to ' . $this->store);
-        }
-        if (file_put_contents($this->store . '/key.pem', $keyPem) === false) {
-            throw new \RuntimeException('Cannot write key.pem to ' . $this->store);
-        }
-        @chmod($this->store . '/key.pem', 0600);
+        // FIX: files are written to temp files and atomically renamed. Before,
+        // cert.pem and key.pem were overwritten in place (nginx could reload a
+        // mismatching cert/key pair, the key was briefly world-readable, and
+        // overwriting the root-owned fallback files failed).
+        // The key is replaced first; nginx reloads when cert.pem changes.
+        $this->atomicWrite($this->store . '/key.pem', $keyPem, 0600);
+        $this->atomicWrite($this->store . '/cert.pem', $certPem, 0644);
         Logger::channel('tls')->info('certificate written to store', ['store' => $this->store]);
+    }
+
+    private function atomicWrite(string $target, string $content, int $mode): void
+    {
+        $tmp = tempnam($this->store, '.tls-');
+        if ($tmp === false) {
+            throw new \RuntimeException('Cannot create temporary file in ' . $this->store);
+        }
+        try {
+            // tempnam() creates the file with mode 0600, so the key is never exposed.
+            if (file_put_contents($tmp, $content) === false || !chmod($tmp, $mode) || !rename($tmp, $target)) {
+                throw new \RuntimeException('Cannot write ' . basename($target) . ' to ' . $this->store);
+            }
+        } finally {
+            if (is_file($tmp)) {
+                @unlink($tmp);
+            }
+        }
     }
 
     /** @return array<string,mixed> */
@@ -297,19 +388,36 @@ final class TlsService
         };
     }
 
-    private function csrConfig(array $san): string
+    /**
+     * Run an OpenSSL operation with a temporary config carrying the SAN list.
+     * FIX: the temp file was previously never deleted (one leaked file per
+     * request); values are pre-validated by validateSubject().
+     *
+     * @template T
+     * @param list<string> $san
+     * @param callable(string):T $operation
+     * @return T
+     */
+    private function withCsrConfig(array $san, callable $operation): mixed
     {
         if ($san === []) {
-            return dirname(__DIR__, 2) . '/config/openssl.cnf';
+            return $operation(dirname(__DIR__, 2) . '/config/openssl.cnf');
+        }
+        foreach ($san as $entry) {
+            if (preg_match('/[\r\n,\\\\]/', $entry) === 1) {
+                throw new \InvalidArgumentException('Invalid SAN entry');
+            }
         }
         $config = "[req]\ndistinguished_name = dn\nreq_extensions = v3_req\nprompt = no\n[dn]\n[v3_req]\nsubjectAltName = " . implode(',', $san) . "\n";
         $tmp = tempnam(sys_get_temp_dir(), 'openssl');
-        if ($tmp === false) {
-            return dirname(__DIR__, 2) . '/config/openssl.cnf';
+        if ($tmp === false || file_put_contents($tmp, $config) === false) {
+            throw new \RuntimeException('Cannot write temporary OpenSSL config');
         }
-        file_put_contents($tmp, $config);
-
-        return $tmp;
+        try {
+            return $operation($tmp);
+        } finally {
+            @unlink($tmp);
+        }
     }
 
     private function opensslError(): string

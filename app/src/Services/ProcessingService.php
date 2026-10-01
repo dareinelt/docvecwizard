@@ -113,6 +113,13 @@ final class ProcessingService
                 continue;
             }
             $full = $dir . '/' . $item;
+            // SECURITY FIX: do not follow symbolic links. A link inside the
+            // input root could point outside of it (e.g. /etc) and the target
+            // would be stored and offered for download; symlinked directories
+            // could also cause endless recursion.
+            if (is_link($full)) {
+                continue;
+            }
             if (is_dir($full)) {
                 if ($recursive) {
                     $result = array_merge($result, $this->scanFiles($full, true));
@@ -260,6 +267,19 @@ final class ProcessingService
             $collection = MilvusClient::collectionFor((string) $doc['embedding_model']);
             $dimension = (int) $doc['embedding_dimension'];
             $this->ensureCollection($collection, $dimension, 'cosine');
+
+            // FIX (idempotency): a document left in PROCESSING by a crashed or
+            // restarted worker is processed again. Remove partial results of
+            // the previous attempt first, otherwise chunks and vectors were
+            // duplicated. Chunks are persisted before their vectors are
+            // inserted, so existing chunk rows indicate possible leftovers.
+            $leftover = (int) Db::fetchValue('SELECT COUNT(*) FROM document_chunks WHERE document_id = ?', [$id], 0);
+            if ($leftover > 0) {
+                if (Uuid::isValid((string) $doc['document_version_id'])) {
+                    $this->milvus->deleteByFilter($collection, sprintf('document_version_id == "%s"', $doc['document_version_id']));
+                }
+                Db::execute('DELETE FROM document_chunks WHERE document_id = ?', [$id]);
+            }
 
             $jobUuid = Db::fetchValue('SELECT job_id FROM jobs WHERE id = ?', [$doc['job_id']], '');
 

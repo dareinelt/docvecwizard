@@ -4,13 +4,23 @@
 
 - **Basis-URL:** `https://localhost:8443`
 - **Format:** JSON (Request und Response)
-- **CSRF:** Alle schreibenden Endpunkte (`POST`, `PUT`, `DELETE`) benötigen den
-  Header `x-csrf-token`. Das Token liefert `GET /api/csrf`.
+- **Anmeldung:** Alle Endpunkte außer den als *öffentlich* markierten erfordern
+  eine angemeldete Sitzung (Cookie `docvec_sid`). Ohne Sitzung: `401`.
+- **CSRF:** Alle schreibenden Endpunkte (`POST`, `PUT`, `DELETE`) – auch der
+  Login – benötigen den Header `X-CSRF-Token`. Das Token liefern
+  `GET /api/auth/me` bzw. `GET /api/csrf`; Login, Logout und Passwortänderung
+  geben ein neues Token zurück. Ungültiges/fehlendes Token: `403`.
 
 ## Authentifizierung
 
-Sessions werden über Cookies verwaltet. Für die Nutzung über `curl` wird ein
-Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
+| Methode | Pfad | Öffentlich | Beschreibung |
+| --- | --- | --- | --- |
+| GET | `/api/auth/me` | ja | Login-Status: `{authenticated, user, csrf_token}` |
+| POST | `/api/auth/login` | ja | `{username, password}` → `{authenticated, user, csrf_token}`; `401` bei falschen Daten, `429` + `Retry-After` bei zu vielen Fehlversuchen |
+| POST | `/api/auth/logout` | ja | Sitzung beenden → neues anonymes `csrf_token` |
+| POST | `/api/auth/password` | nein | `{current_password, new_password}` (min. 12 Zeichen) |
+
+Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 
 ## Endpunkt-Übersicht
 
@@ -18,9 +28,9 @@ Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
 
 | Methode | Pfad | Beschreibung |
 | --- | --- | --- |
-| GET | `/healthz` | nginx-Liveness |
+| GET | `/healthz` | Liveness (öffentlich) |
 | GET | `/api/health` | Gesamt-Health (DB, Embedding, Converter, Milvus) |
-| GET | `/api/csrf` | CSRF-Token abrufen |
+| GET | `/api/csrf` | CSRF-Token abrufen (öffentlich) |
 | GET | `/api/system` | Systemstatus/-informationen |
 | GET | `/api/metrics` | Systemmetriken |
 
@@ -125,19 +135,31 @@ Cookie-Jar benötigt. Das CSRF-Token wird vom Server signiert (CSRF-Secret).
 ### Health-Check
 
 ```bash
-curl -sk https://localhost:8443/api/health
+curl -sk https://localhost:8443/healthz
 ```
 
 ```json
-{"status":"ok","checks":{"database":true,"embedding":true,"converter":true,"milvus":true}}
+{"status":"ok","time":"2025-01-01T12:00:00Z"}
+```
+
+### Anmelden
+
+```bash
+JAR=/tmp/jar
+CSRF=$(curl -sk -c $JAR -b $JAR https://localhost:8443/api/auth/me | jq -r .csrf_token)
+CSRF=$(curl -sk -c $JAR -b $JAR \
+  -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"<Passwort>"}' \
+  https://localhost:8443/api/auth/login | jq -r .csrf_token)
+curl -sk -b $JAR https://localhost:8443/api/health
 ```
 
 ### Job anlegen
 
 ```bash
-CSRF=$(curl -sk -c /tmp/jar https://localhost:8443/api/csrf | jq -r .token)
-curl -sk -b /tmp/jar \
-  -H "x-csrf-token: $CSRF" \
+curl -sk -b $JAR \
+  -H "X-CSRF-Token: $CSRF" \
   -H "Content-Type: application/json" \
   -d '{"name":"Mein Auftrag","source_directory":"beispiele","recursive":true,"embedding_model":"Qwen3-Embedding-0.6B"}' \
   https://localhost:8443/api/jobs
@@ -146,12 +168,15 @@ curl -sk -b /tmp/jar \
 ### Semantische Suche
 
 ```bash
-curl -sk -b /tmp/jar \
-  -H "x-csrf-token: $CSRF" \
+curl -sk -b $JAR \
+  -H "X-CSRF-Token: $CSRF" \
   -H "Content-Type: application/json" \
   -d '{"query":"Was ist ein Dokument?","limit":10}' \
   https://localhost:8443/api/search
 ```
+
+Treffer enthalten u. a. `document_id`, `filename`, `chunk_index`,
+`page_start`/`page_end`, `text`, `distance` und `download_endpoint`.
 
 ## Fehlerformat
 
@@ -161,9 +186,23 @@ Fehler liefern einen HTTP-Statuscode und eine JSON-Antwort:
 {"error":"Beschreibung des Fehlers"}
 ```
 
+| Status | Bedeutung |
+| --- | --- |
+| 400 | Ungültige Eingabe (Validierung, fehlerhaftes JSON) |
+| 401 | Nicht angemeldet / falsche Zugangsdaten |
+| 403 | CSRF-Token ungültig oder fehlend |
+| 404 | Ressource oder Route nicht gefunden (auch bei ungültigen IDs) |
+| 405 | Methode nicht erlaubt (Header `Allow`) |
+| 409 | Konflikt (z. B. Datei existiert bereits) |
+| 429 | Zu viele Anfragen/Fehlversuche (Header `Retry-After`) |
+| 500 | Interner Fehler (Details nur im Server-Log) |
+| 502 | Abhängiger Dienst (Milvus, Embedding, Converter) nicht erreichbar |
+
 ## Hinweise
 
 - `POST /api/jobs` erfordert ein gültiges, bekanntes `embedding_model`
-  (sonst `400 Unknown embedding model`).
+  (sonst `400`).
 - `POST /api/search` erfordert ein aktives Modell und einen nicht-leeren
-  `query` (sonst `400`).
+  `query` (max. 2000 Zeichen, `limit` 1–50; sonst `400`).
+- `POST /api/upload` akzeptiert nur unterstützte Dokumenttypen bis
+  `UPLOAD_MAX_SIZE` und überschreibt keine vorhandenen Dateien (`409`).

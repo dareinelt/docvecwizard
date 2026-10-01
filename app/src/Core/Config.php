@@ -39,6 +39,28 @@ final class Config
         return filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 
+    /**
+     * Return a secret that must be configured with a strong, non-placeholder
+     * value. Fails closed: an empty or example secret would make derived keys
+     * (e.g. TLS private-key encryption) predictable.
+     *
+     * @throws \RuntimeException when the secret is missing or weak
+     */
+    public static function secret(string $key, int $minLength = 32): string
+    {
+        $value = self::$values[$key] ?? '';
+        if (!self::isStrongSecret($value, $minLength)) {
+            throw new \RuntimeException(sprintf('%s is not configured with a strong secret (min. %d chars, no placeholder)', $key, $minLength));
+        }
+
+        return $value;
+    }
+
+    public static function isStrongSecret(string $value, int $minLength = 32): bool
+    {
+        return strlen($value) >= $minLength && !str_starts_with(strtolower($value), 'change-me');
+    }
+
     public static function set(string $key, string $value): void
     {
         self::$values[$key] = $value;

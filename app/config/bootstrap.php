@@ -60,6 +60,6 @@ Db::connect(Config::string('MYSQL_HOST', 'db'), [
 // --- Timezone ---------------------------------------------------------------
 date_default_timezone_set(Config::string('APP_TIMEZONE', 'UTC'));
 
-Logger::channel('bootstrap')->info('bootstrap complete', [
+Logger::channel('bootstrap')->debug('bootstrap complete', [
     'version' => Config::string('APP_VERSION', '0.0.0'),
 ]);
