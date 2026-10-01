@@ -10,7 +10,7 @@ benötigt der Betrieb **keine** Internetverbindung.
 | Schritt | Zweck |
 | --- | --- |
 | `docker compose build` | Basis-Images herunterladen |
-| Erster Start des `embedding`-Dienstes | Qwen3-Modelle aus Hugging Face laden |
+| `docker compose --profile tools run --rm model-download` | Qwen3-Modelle von Hugging Face nach `embedding/models/` laden |
 | Erster Pull von `milvusdb/milvus` / `mariadb` | Basis-Images |
 
 Nach diesen Schritten sind alle Artefakte lokal vorhanden:
@@ -65,7 +65,9 @@ docker compose up -d
 
 ## Einschränkungen im Offline-Betrieb
 
-- **Kein** Modell-Download/Update möglich (Modelle müssen vorab vorliegen).
+- **Kein** Modell-Download/Update möglich (Modelle müssen vorab in
+  `embedding/models/` vorliegen; der laufende `embedding`-Container hat auch
+  online keinen Internetzugang).
 - **Kein** Update der Docker-Basis-Images möglich.
 - Alles andere (Indizierung, Suche, Export, TLS-Selbstsignierung) funktioniert
   vollständig lokal.

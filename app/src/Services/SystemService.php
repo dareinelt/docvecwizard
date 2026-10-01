@@ -59,7 +59,11 @@ final class SystemService
     private function embedding(): bool
     {
         try {
-            return (new EmbeddingClient())->health()['status'] === 'ok';
+            $health = (new EmbeddingClient())->health();
+
+            // The service reports "degraded" (and model_loaded=false) when no
+            // model is loaded, e.g. because it was never downloaded.
+            return ($health['status'] ?? '') === 'ok' && ($health['model_loaded'] ?? false) === true;
         } catch (\Throwable) {
             return false;
         }

@@ -41,13 +41,16 @@ cp .env.example .env
 # 2. Images bauen
 docker compose build
 
-# 3. Stack starten (lädt Modelle herunter und migriert die Datenbank)
+# 3. Embedding-Modelle einmalig herunterladen (benötigt Internet, nach ./embedding/models)
+docker compose --profile tools run --rm model-download
+
+# 4. Stack starten (migriert die Datenbank)
 docker compose up -d
 
-# 4. Status prüfen
+# 5. Status prüfen
 docker compose ps
 
-# 5. Logs beobachten
+# 6. Logs beobachten
 docker compose logs -f app worker
 ```
 
@@ -62,7 +65,7 @@ entfernt werden. Ohne gesetztes `ADMIN_PASSWORD` ein Konto anlegen mit
 
 - Docker (Engine ≥ 24) und Docker Compose (v2)
 - mind. 16 GB RAM und 8 CPU-Kerne empfohlen (Stack ist bewusst konservativ dimensioniert)
-- die Embedding-Modelle werden beim ersten Start heruntergeladen (Offline-Betrieb erst nach einmaligem Download)
+- die Embedding-Modelle werden **nicht** automatisch geladen: der laufende `embedding`-Container hat keinen Internetzugang. Einmalig `docker compose --profile tools run --rm model-download` ausführen (siehe [docs/EMBEDDING.md](docs/EMBEDDING.md)); danach ist der Betrieb vollständig offline möglich
 
 ## Dokumentation
 

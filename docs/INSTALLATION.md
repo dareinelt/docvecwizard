@@ -34,7 +34,7 @@ Die `.env`-Datei **muss** vor dem ersten Start angepasst werden. Zwingend zu
 MYSQL_PASSWORD=…
 MYSQL_ROOT_PASSWORD=…
 SESSION_SECRET=…
-CSRF_SECRET=…
+ADMIN_PASSWORD=…
 ```
 
 Die Secrets müssen lang und zufällig sein. Erzeugen mit:
@@ -51,8 +51,9 @@ Alle übrigen Optionen sind in [CONFIGURATION.md](CONFIGURATION.md) dokumentiert
 docker compose build
 ```
 
-**Zweck:** Baut die drei eigenen Images (`app`, `embedding`, `converter`, `web`)
-sowie die Basis-Images (`mariadb`, `milvus`).
+**Zweck:** Baut die vier eigenen Images (`app`, `web`, `embedding`, `converter`)
+sowie die Basis-Images (`mariadb`, `milvus`). `app` wird zusätzlich für
+`worker` und `migrate` verwendet.
 
 **Erwartetes Ergebnis:** Alle Images werden ohne Fehler gebaut.
 
@@ -63,7 +64,37 @@ sowie die Basis-Images (`mariadb`, `milvus`).
 - *Build-Kontext nicht gefunden* → sicherstellen, dass `app/`, `embedding/`,
   `converter/` und `web/` vorhanden sind.
 
-## Schritt 4: Stack starten
+## Schritt 4: Embedding-Modelle herunterladen
+
+Der laufende `embedding`-Dienst hängt ausschließlich am internen Docker-Netz
+(ohne Internet) und lädt **nur bereits vorhandene** Modelle aus
+`./embedding/models/<Modellname>/`. Die Modelle müssen daher **vor dem ersten
+Start** einmalig bereitgestellt werden:
+
+```bash
+docker compose --profile tools run --rm model-download
+```
+
+**Zweck:** Startet einen Einmal-Container (gleiches Image wie `embedding`, aber
+im Netz `tools` mit Internetzugang), der alle in `EMBEDDING_MODELS`
+aufgeführten Modelle von Hugging Face nach `./embedding/models` lädt
+(`embedding/scripts/download-models.py`). Bereits vorhandene Modelle werden
+übersprungen; der Aufruf ist wiederholbar.
+
+**Erwartetes Ergebnis:** Für jedes Modell `DONE <Name>`; danach existiert
+`embedding/models/<Name>/config.json` sowie mindestens eine `*.safetensors`-Datei.
+Das Standardmodell `Qwen3-Embedding-0.6B` hat ca. 1,2 GB, `4B`/`8B` entsprechend
+mehr – siehe [EMBEDDING.md](EMBEDDING.md).
+
+**Alternative ohne Docker-Internetzugang:** Modelle auf einem anderen Rechner
+laden (`pip install huggingface_hub`, dann
+`MODELS_DIR=./embedding/models python embedding/scripts/download-models.py`)
+und das Verzeichnis `embedding/models/` auf den Zielhost kopieren
+(siehe [OFFLINE_OPERATION.md](OFFLINE_OPERATION.md)). Hinter einem Proxy
+`HTTP_PROXY`/`HTTPS_PROXY` in `.env` setzen; sie werden an `model-download`
+durchgereicht.
+
+## Schritt 5: Stack starten
 
 ```bash
 docker compose up -d
@@ -82,17 +113,10 @@ und `healthcheck` abgesichert:
 **Erwartetes Ergebnis:** `docker compose ps` zeigt alle Dienste mit Status
 `running` (bzw. `exited (0)` für `migrate`, das ist korrekt).
 
-## Schritt 5: Modell-Download prüfen
-
-Beim ersten Start lädt der `embedding`-Dienst die konfigurierten Modelle aus dem
-Hugging-Face-Hub herunter. Der Fortschritt ist im Log sichtbar:
-
-```bash
-docker compose logs -f embedding
-```
-
-Das Standardmodell `Qwen3-Embedding-0.6B` hat ca. 1,2 GB. Größere Modelle
-(`4B`, `8B`) entsprechend mehr – siehe [EMBEDDING.md](EMBEDDING.md).
+Fehlt das Standardmodell, startet `embedding` trotzdem, meldet aber im Log
+`model … is not present in /models/…` und über `/health`
+`"model_loaded": false` mit dem Fehlertext. `GET /api/health` zeigt dann
+`"embedding": false`.
 
 ## Schritt 6: Status verifizieren
 

@@ -17,6 +17,9 @@ networks:
   backend:
     driver: bridge
     internal: true
+  # Internet-capable network used ONLY by the one-shot model download tool.
+  tools:
+    driver: bridge
 
 volumes:
   db_data:
@@ -126,6 +129,39 @@ services:
       start_period: 60s
     mem_limit: 8g
     cpus: 6
+
+  # ---------------------------------------------------------------------------
+  # Model download (tool, not part of the running stack)
+  #
+  # The embedding service itself has no internet access (network `backend` is
+  # internal) and only loads models that already exist in ./embedding/models.
+  # Run this one-shot tool once (and after adding models to EMBEDDING_MODELS):
+  #
+  #   docker compose --profile tools run --rm model-download
+  #
+  # It uses the same image as `embedding`, but on the `tools` network with
+  # internet access. Runs as root so the bind mount is writable regardless of
+  # host ownership; the embedding service only needs read access.
+  # ---------------------------------------------------------------------------
+  model-download:
+    build:
+      context: ./embedding
+    profiles: ["tools"]
+    restart: "no"
+    user: "0:0"
+    command: ["python", "scripts/download-models.py"]
+    environment:
+      EMBEDDING_MODELS: ${EMBEDDING_MODELS:-Qwen3-Embedding-0.6B}
+      MODELS_DIR: /models
+      HF_HOME: /models/.cache
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - ./embedding/models:/models
+    networks:
+      - tools
+    mem_limit: 2g
 
   # ---------------------------------------------------------------------------
   # Document converter - PDF/DOCX/PPTX/... -> text/markdown

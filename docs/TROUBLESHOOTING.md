@@ -51,8 +51,10 @@ docker compose logs embedding
 ```
 
 **Ursachen/Lösungen:**
-- Modell wird noch heruntergeladen (erster Start) → warten.
-- Kein Internet beim ersten Download → einmalig Online-Verbindung herstellen.
+- Modell nicht vorhanden (`model … is not present in /models/…` im Log,
+  `/health` meldet `model_loaded: false`) → einmalig
+  `docker compose --profile tools run --rm model-download` ausführen, dann
+  `docker compose restart embedding`.
 - Zu wenig RAM → kleineres Modell wählen oder `mem_limit` erhöhen.
 
 ### 4. `converter: false`
