@@ -98,7 +98,7 @@ Für `curl` wird ein Cookie-Jar benötigt (siehe Beispiele).
 | GET | `/api/vectors/{id}/document` | Zugehöriges Dokument (Milvus → Original) |
 | GET | `/api/chunks/{id}` | Chunk-Datensatz |
 | GET | `/api/chunks/{id}/source` | Quelle eines Chunks |
-| GET | `/api/source/{document_version_id}` | Quelle einer bestimmten Version |
+| GET | `/api/source/{id}` | Quelle einer bestimmten Version (`id` = `document_version_id`) |
 
 ### Kollektionen (Milvus)
 

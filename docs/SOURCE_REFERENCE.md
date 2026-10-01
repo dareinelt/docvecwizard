@@ -144,7 +144,7 @@ Die REST-API stellt dedizierte Quellen-Endpunkte bereit:
 - `GET /api/vectors/{id}/document` – zugehöriges Dokument (Gegenrichtung)
 - `GET /api/chunks/{id}` – Chunk-Datensatz
 - `GET /api/chunks/{id}/source` – Quelle eines Chunks
-- `GET /api/source/{document_version_id}` – Quelle einer bestimmten Version
+- `GET /api/source/{id}` – Quelle einer bestimmten Version (`id` = `document_version_id`)
 
 Der Download liefert die **exakten Originalbytes** (Base64 → Dekodierung) mit
 korrektem `Content-Type`, `Content-Length` und `Content-Disposition`.

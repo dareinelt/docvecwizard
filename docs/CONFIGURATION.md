@@ -49,8 +49,9 @@ wird von Docker Compose an die Container weitergereicht. Eine Vorlage liegt als
 | --- | --- | --- |
 | `EMBEDDING_HOST` | `embedding` | Dienstname |
 | `EMBEDDING_PORT` | `8000` | API-Port |
-| `EMBEDDING_MODELS` | `Qwen3-Embedding-0.6B` | Kommaseparierte Liste der beim Start geladenen Modelle |
-| `EMBEDDING_DEFAULT_MODEL` | `Qwen3-Embedding-0.6B` | Standardmodell |
+| `EMBEDDING_MODELS` | `Qwen3-Embedding-0.6B` | Kommaseparierte Liste der Modelle, die der Dienst **anbietet** (Katalog). Die Gewichte müssen vorab mit `docker compose --profile tools run --rm model-download` nach `embedding/models/` geladen werden; der laufende Dienst hat keinen Internetzugang |
+| `EMBEDDING_DEFAULT_MODEL` | `Qwen3-Embedding-0.6B` | Modell, das der Dienst **beim Start** lädt. Nur ein Modell ist gleichzeitig geladen; welches Modell *aktiv* ist, bestimmt die Datenbank (`embedding_models.active`, Ansicht **System**). Der Worker gleicht den Dienst beim Start und im Leerlauf daran an |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | – | Nur für den Download-Container `model-download` (Profil `tools`) |
 
 Verfügbare Modelle (aus `embedding/catalog.json`):
 
@@ -180,7 +181,13 @@ Dienste neu.
 
 ## Laufzeit-Einstellungen (Datenbank)
 
-Einige Einstellungen (z. B. aktives Embedding-Modell) werden nicht über `.env`,
-sondern über die Datenbank-Tabelle `settings` bzw. die Oberfläche (Ansicht
-„Einstellungen“) verwaltet. Siehe [ADMIN_GUIDE.md](ADMIN_GUIDE.md) und
-[DATABASE.md](DATABASE.md).
+Das **aktive Embedding-Modell** wird nicht über `.env`, sondern in der
+Datenbank verwaltet (`embedding_models.active`, Ansicht **System** →
+„Aktivieren“, `POST /api/models/activate`). Der Modellkatalog (Name,
+Dimension) wird beim Worker-Start und über `POST /api/models/sync` aus dem
+Embedding-Dienst übernommen.
+
+Die Tabelle `settings` (Ansicht **Einstellungen**) ist dagegen ein freier
+Schlüssel/Wert-Speicher ohne Einfluss auf die Verarbeitung (siehe
+[Worker → Einstellungen-Tabelle](#einstellungen-tabelle)). Siehe auch
+[ADMIN_GUIDE.md](ADMIN_GUIDE.md) und [DATABASE.md](DATABASE.md).

@@ -12,21 +12,30 @@ Es gibt drei Testebenen:
 
 ## Unit-Tests
 
-Testen isolierte Komponenten ohne externe Abhängigkeiten:
+Testen isolierte Komponenten ohne externe Abhängigkeiten (reine Funktionen,
+keine Datenbank, kein Netzwerk):
 
 ```bash
 php tests/unit/run.php
+# ohne lokales PHP:
+docker run --rm -v "$PWD:/w" -w /w php:8.3-cli-alpine php tests/unit/run.php
 ```
 
 Abgedeckte Klassen (aus `tests/unit/`):
 
 | Testdatei | Testet |
 | --- | --- |
-| `ChunkerTest.php` | Text-Chunking, Überlappung, Token-Schätzung |
+| `Base64Test.php` | Base64-Kodierung der Original-Blobs |
+| `ChunkerTest.php` | Text-Chunking, Überlappung, Token-Schätzung, `CHUNK_MIN_TOKENS`-Zusammenführung |
 | `ConfigTest.php` | Konfigurations-Loader |
+| `DiscoveryTest.php` | Discovery-Entscheidung (`ProcessingService::discoveryDecision`: neu / neue Version / Requeue / Skip) |
+| `EmbeddingTest.php` | Dimensionsprüfung der Vektoren (`EmbeddingClient::assertDimension`), `ModelMismatchException` |
 | `HashTest.php` | Hashing |
+| `JobStatusTest.php` | Job-Zustände (kein `PAUSED`, Resume nur aus `CANCELLED`), Finalisierungsregel `JobService::finalStatus` |
 | `MetadataTest.php` | Metadaten-Extraktion |
 | `PathGuardTest.php` | Pfad-Auflösung/Path-Traversal-Schutz |
+| `SearchTest.php` | Filterung der Suchtreffer auf aktuelle Versionen, Kandidatenfenster |
+| `SecurityTest.php` | HTTP-Schicht: Upload-Normalisierung, Request-Parsing/-Validierung, Router (404/405, Guard, HEAD), sichere Download-/JSON-Header |
 | `UuidTest.php` | UUID-Generierung |
 
 ## Integrationstests
@@ -73,16 +82,26 @@ Test                 Erwartetes Ergebnis    Tatsächliches Ergebnis    Status
 
 ## Ausführung im CI
 
-```bash
-# Voraussetzung: Stack läuft
-docker compose up -d --wait
+Ohne laufenden Stack (so läuft es in `.github/workflows/ci.yml`):
 
-# Unit-Tests
-php tests/unit/run.php
+```bash
+# Syntax aller PHP-Dateien, Unit-Tests, JS-Syntax, Python-Compile,
+# Compose-Validierung, Migrationen app/ == database/
+docker run --rm -v "$PWD:/w" -w /w php:8.3-cli-alpine php tests/unit/run.php
+node --check web/html/assets/js/app.js
+python -m py_compile embedding/src/main.py converter/src/*.py
+cp .env.example .env && docker compose config -q
+diff -r app/migrations database/migrations
+```
+
+Mit laufendem Stack:
+
+```bash
+docker compose up -d --wait
 
 # Integration
 tests/integration/run.sh
 
-# Smoke
+# Smoke (inkl. Export/Import-Roundtrip)
 tests/smoke-test.sh
 ```
