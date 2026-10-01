@@ -100,7 +100,7 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | --- | --- | --- |
 | `CHUNK_SIZE_TOKENS` | `512` | Zielgröße eines Chunks (Tokens) |
 | `CHUNK_OVERLAP_TOKENS` | `64` | Überlappung zwischen Chunks |
-| `CHUNK_MIN_TOKENS` | `50` | Mindestgröße eines Chunks |
+| `CHUNK_MIN_TOKENS` | `50` | Mindestgröße des letzten Chunks: ein kleinerer Rest wird an den vorherigen Chunk angehängt (sofern `CHUNK_MAX_TOKENS` eingehalten wird); `0` deaktiviert |
 | `CHUNK_MAX_TOKENS` | `1024` | Harte Obergrenze eines Chunks |
 | `EMBED_BATCH_SIZE` | `16` | Batch-Größe beim Embedding |
 
@@ -108,9 +108,29 @@ ${DATA_DIR}/exports  → /srv/data/exports
 
 | Variable | Standard | Beschreibung |
 | --- | --- | --- |
-| `WORKER_CONCURRENCY` | `2` | Gleichzeitig verarbeitete Dokumente |
-| `WORKER_BATCH_SIZE` | `16` | Batch-Größe beim Dokument-Abruf |
-| `WORKER_LOCK_TIMEOUT` | `1800` | Lock-Timeout in Sekunden (Crash Recovery) |
+| `WORKER_POLL_INTERVAL` | `2` | Wartezeit in Sekunden, wenn keine Arbeit ansteht |
+
+Der Worker verarbeitet genau **ein Dokument gleichzeitig**; es ist immer nur
+ein Worker aktiv (MySQL-Advisory-Lock, weitere Replikate warten als Standby).
+Die früher dokumentierten Variablen `WORKER_CONCURRENCY`, `WORKER_BATCH_SIZE`
+und `WORKER_LOCK_TIMEOUT` hatten keine Wirkung und wurden entfernt.
+
+### Metriken
+
+Der Worker schreibt Laufzeitmetriken nach `system_metrics` (sichtbar unter
+**System → System-Metriken** bzw. `GET /api/metrics`): `document_duration_seconds`
+je Dokument (mit Dokument-ID, Endung, Größe, Status, Chunks als `meta`) sowie
+`job_duration_seconds`, `job_documents_processed`, `job_documents_failed` und
+`job_chunks_total` je abgeschlossenem Auftrag. Einträge älter als 30 Tage
+werden beim Abschluss eines Auftrags gelöscht.
+
+### Einstellungen-Tabelle
+
+Die Tabelle `settings` (`GET/PUT /api/settings`, Ansicht **Einstellungen**) ist
+ein freier Schlüssel/Wert-Speicher und beeinflusst die Verarbeitung **nicht**.
+Chunking, Embedding und Worker werden ausschließlich über die hier
+beschriebenen Umgebungsvariablen konfiguriert; das aktive Modell liegt in
+`embedding_models.active`.
 
 ## Session / Sicherheit
 
@@ -119,6 +139,7 @@ ${DATA_DIR}/exports  → /srv/data/exports
 | `SESSION_SECRET` | – | Geheimnis (min. 32 Zeichen) zur Verschlüsselung gespeicherter TLS-Schlüssel (**ändern!**, Platzhalter werden abgelehnt) |
 | `SESSION_IDLE_TIMEOUT` | `1800` | Sitzungs-Leerlauf-Timeout in Sekunden |
 | `SESSION_ABSOLUTE_TIMEOUT` | `43200` | Maximale Sitzungsdauer in Sekunden |
+| `SESSION_SAVE_PATH` | `/app/storage/sessions` | Ablageort der PHP-Sitzungsdateien im App-Container (normalerweise nicht ändern) |
 | `LOGIN_MAX_ATTEMPTS_USER` | `5` | Fehlversuche je Benutzer im Zeitfenster |
 | `LOGIN_MAX_ATTEMPTS_IP` | `20` | Fehlversuche je IP im Zeitfenster |
 | `LOGIN_THROTTLE_WINDOW` | `900` | Zeitfenster/Sperrdauer in Sekunden |

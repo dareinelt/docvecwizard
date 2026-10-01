@@ -1038,6 +1038,7 @@
     renderInto(el, `
       <div class="grid split">
         <section class="card" aria-labelledby="set-title"><h2 id="set-title">Einstellungen</h2>
+          <p class="muted">Freie Schlüssel/Wert-Paare in der Datenbank (z.&nbsp;B. für Notizen oder externe Integrationen). Sie steuern <strong>nicht</strong> die Verarbeitung: Chunking, Embedding und Worker werden ausschließlich über Umgebungsvariablen (<code>.env</code>) konfiguriert, das aktive Modell unter „System“.</p>
           <form id="settings-form">
           ${keys.length
             ? keys.map((k, i) => `<label for="set-${i}">${esc(k)}</label><input id="set-${i}" name="${esc(k)}" value="${esc(settings[k])}" maxlength="4096">`).join('')

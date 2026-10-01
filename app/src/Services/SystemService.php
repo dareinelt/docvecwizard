@@ -87,6 +87,12 @@ final class SystemService
         );
     }
 
+    /** Delete metric snapshots older than $days days; returns the number of deleted rows. */
+    public function pruneMetrics(int $days = 30): int
+    {
+        return Db::execute('DELETE FROM system_metrics WHERE recorded_at < (UTC_TIMESTAMP() - INTERVAL ? DAY)', [max(1, $days)]);
+    }
+
     /** @return list<array<string,mixed>> */
     public function recentMetrics(string $service = '', int $limit = 100): array
     {

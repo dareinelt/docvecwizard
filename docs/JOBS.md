@@ -46,9 +46,16 @@ CREATED ──► RUNNING ──► COMPLETED
 `app/bin/worker.php` – ein PHP-CLI-Prozess mit Schleife:
 
 - **Claim** von Jobs (`CREATED → RUNNING`) und Dokumenten
-  (`DISCOVERED → PROCESSING`) über atomare SQL-Updates.
-- **Batch-Verarbeitung** (`WORKER_BATCH_SIZE`).
-- **Concurrency** über `WORKER_CONCURRENCY`.
+  (`DISCOVERED`/`PENDING → PROCESSING`) über atomare SQL-Updates.
+- **Sequenziell**: ein Dokument nach dem anderen; Chunks werden in Batches
+  von `EMBED_BATCH_SIZE` an den Embedding-Dienst gesendet.
+- **Ein aktiver Worker** (MySQL-Advisory-Lock `docvecwizard_worker`);
+  weitere Replikate warten als Standby.
+- **Modellabgleich**: beim Start und im Leerlauf (ca. jede Minute) wird das im
+  Embedding-Dienst geladene Modell mit dem aktiven DB-Modell abgeglichen; bei
+  der Verarbeitung erzwingt der Worker das Modell des Auftrags.
+- **Metriken** je Dokument/Auftrag nach `system_metrics` (siehe
+  [CONFIGURATION.md](CONFIGURATION.md#metriken)).
 
 ### Graceful Shutdown
 
@@ -69,10 +76,11 @@ zurück.
 
 | Variable | Standard | Beschreibung |
 | --- | --- | --- |
-| `WORKER_CONCURRENCY` | 2 | parallele Dokumente |
-| `WORKER_BATCH_SIZE` | 16 | Dokumente je Batch |
-| `WORKER_LOCK_TIMEOUT` | 1800 | Lock-Timeout (s) |
-| `WORKER_POLL_INTERVAL` | 2 | Poll-Intervall (s) |
+| `WORKER_POLL_INTERVAL` | 2 | Poll-Intervall (s) im Leerlauf |
+
+Weitere Worker-Variablen gibt es nicht: Es ist genau ein Worker aktiv und er
+verarbeitet ein Dokument nach dem anderen (siehe
+[CONFIGURATION.md](CONFIGURATION.md#worker)).
 
 ## Abbruch und Fortsetzung
 

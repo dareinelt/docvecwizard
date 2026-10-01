@@ -24,6 +24,7 @@ use App\Services\JobService;
 use App\Services\MilvusClient;
 use App\Services\ModelService;
 use App\Services\ProcessingService;
+use App\Services\SystemService;
 
 require __DIR__ . '/../config/bootstrap.php';
 
@@ -67,10 +68,38 @@ function finalizeJob(int $id): void
 
     $status = JobService::finalStatus((int) $job['documents_failed'], (int) $job['documents_processed']);
     $jobService->setStatus($id, $status);
+    recordMetrics(static function (SystemService $metrics) use ($job, $status): void {
+        $meta = ['job_id' => $job['job_id'], 'status' => $status, 'embedding_model' => $job['embedding_model']];
+        $started = $job['started_at'] !== null ? strtotime((string) $job['started_at'] . ' UTC') : false;
+        if ($started !== false) {
+            $metrics->recordMetric('worker', 'job_duration_seconds', (float) max(0, time() - $started), $meta);
+        }
+        $metrics->recordMetric('worker', 'job_documents_processed', (float) $job['documents_processed'], $meta);
+        $metrics->recordMetric('worker', 'job_documents_failed', (float) $job['documents_failed'], $meta);
+        $metrics->recordMetric('worker', 'job_chunks_total', (float) $job['chunks_total'], $meta);
+        $metrics->pruneMetrics(METRICS_RETENTION_DAYS);
+    });
     Logger::channel('worker')->info('job finalized', [
         'job_id' => $job['job_id'],
         'status' => $status,
     ]);
+}
+
+const METRICS_RETENTION_DAYS = 30;
+
+/**
+ * Metrics are best effort: a failing INSERT into system_metrics must never
+ * break job processing.
+ *
+ * @param callable(SystemService):void $fn
+ */
+function recordMetrics(callable $fn): void
+{
+    try {
+        $fn(new SystemService());
+    } catch (\Throwable $e) {
+        Logger::channel('worker')->debug('metric not recorded', ['error' => $e->getMessage()]);
+    }
 }
 
 /** Recover jobs/documents left in a transitional state by a previous crash. */
@@ -161,6 +190,15 @@ while (!$stopping) {
                 'status' => $result['status'],
                 'chunks' => $result['chunks'] ?? 0,
             ]);
+            recordMetrics(static function (SystemService $metrics) use ($doc, $result): void {
+                $metrics->recordMetric('worker', 'document_duration_seconds', (float) ($result['duration'] ?? 0), [
+                    'document_id' => $doc['document_id'],
+                    'extension' => $doc['extension'],
+                    'file_size' => (int) $doc['file_size'],
+                    'status' => $result['status'],
+                    'chunks' => (int) ($result['chunks'] ?? 0),
+                ]);
+            });
             $didWork = true;
         }
     }

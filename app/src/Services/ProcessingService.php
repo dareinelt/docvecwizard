@@ -41,6 +41,7 @@ final class ProcessingService
             'max_tokens' => Config::int('CHUNK_SIZE_TOKENS', 512),
             'overlap_tokens' => Config::int('CHUNK_OVERLAP_TOKENS', 64),
             'hard_max_tokens' => Config::int('CHUNK_MAX_TOKENS', 1024),
+            'min_tokens' => Config::int('CHUNK_MIN_TOKENS', 50),
             'batch_size' => Config::int('EMBED_BATCH_SIZE', 32),
         ];
     }
@@ -516,7 +517,7 @@ final class ProcessingService
     private function chunkByPage(string $text, int $pageCount, bool $isPdf): array
     {
         $config = $this->chunkerConfig();
-        $chunker = new Chunker($config['max_tokens'], $config['overlap_tokens'], $config['hard_max_tokens']);
+        $chunker = new Chunker($config['max_tokens'], $config['overlap_tokens'], $config['hard_max_tokens'], $config['min_tokens']);
 
         $chunks = [];
         $index = 0;
