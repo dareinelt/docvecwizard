@@ -4,7 +4,7 @@
 #
 # Reproducible end-to-end verification of the fully-offline stack:
 #   Docker, Web, PHP, MySQL, Milvus, Embedding, Converter, API,
-#   document processing, vector insert, statistics, export, HTTPS.
+#   document processing, vector insert, statistics, export + import roundtrip, HTTPS.
 #
 # Usage:
 #   ./tests/smoke-test.sh
@@ -265,6 +265,26 @@ if [ -n "$EXPORT_ID" ]; then
     "tar -xzOf '$EXPORT_FILE' manifest.json 2>/dev/null | jq -e '.documents | type == \"number\"'"
   check "export archive contains documents payload" \
     "tar -xzOf '$EXPORT_FILE' mysql/documents.json 2>/dev/null | jq -e 'type == \"array\"'"
+
+  # Import roundtrip into the same instance: every exported version already
+  # exists with an identical hash, so nothing may be imported or conflict and
+  # the document count must stay unchanged - with both conflict strategies.
+  DOCS_BEFORE="$(api GET /api/statistics | jq -r '.documents.versions // empty')"
+  IMPORT_SKIP_JSON="$(curl -sk -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -H "x-csrf-token: ${CSRF_TOKEN:-}" \
+    -F "archive=@$EXPORT_FILE;type=application/gzip" -F 'strategy=skip' "$BASE_URL/api/import")"
+  check "import (strategy=skip) of own export is accepted" \
+    "printf '%s' '$IMPORT_SKIP_JSON' | jq -e '(.imported | type == \"number\") and (.reused | type == \"number\")'"
+  check "import (strategy=skip) reuses every version, imports nothing, no conflicts" \
+    "printf '%s' '$IMPORT_SKIP_JSON' | jq -e '.reused >= 1 and .imported == 0 and .conflicts == 0'"
+  IMPORT_OVERWRITE_JSON="$(curl -sk -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -H "x-csrf-token: ${CSRF_TOKEN:-}" \
+    -F "archive=@$EXPORT_FILE;type=application/gzip" -F 'strategy=overwrite' "$BASE_URL/api/import")"
+  check "import (strategy=overwrite) of own export reuses identical versions without overwriting" \
+    "printf '%s' '$IMPORT_OVERWRITE_JSON' | jq -e '.reused >= 1 and .overwritten == 0 and .conflicts == 0'"
+  check "import rejects an unknown conflict strategy (400)" \
+    "test \"\$(curl -sk -o /dev/null -w '%{http_code}' -X POST -b '$COOKIE_JAR' -c '$COOKIE_JAR' -H 'x-csrf-token: ${CSRF_TOKEN:-}' -F 'archive=@$EXPORT_FILE' -F 'strategy=merge' '$BASE_URL/api/import')\" = 400"
+  DOCS_AFTER="$(api GET /api/statistics | jq -r '.documents.versions // empty')"
+  check "document version count unchanged after import roundtrip" \
+    "test -n '$DOCS_BEFORE' && test '$DOCS_BEFORE' = '$DOCS_AFTER'"
 fi
 
 # ---------------------------------------------------------------------------

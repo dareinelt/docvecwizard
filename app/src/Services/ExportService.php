@@ -545,13 +545,26 @@ final class ExportService
             $entries++;
             $bytes += (int) $file->getSize();
             $relative = ltrim(substr(str_replace('\\', '/', $file->getPathname()), strlen($prefix)), '/');
-            if ($relative === '' || str_contains($relative, '..') || str_contains($relative, "\0") || str_starts_with($relative, '/')) {
+            if (!self::isSafeArchivePath($relative)) {
                 throw new \InvalidArgumentException('Archive contains an unsafe path');
             }
             if ($entries > $maxEntries || $bytes > $maxBytes) {
                 throw new \InvalidArgumentException('Archive exceeds the configured import limits');
             }
         }
+    }
+
+    /**
+     * Pure path rule for archive entries: relative, non-empty, no `..`
+     * segments (anywhere, also inside names like `a..b` — deliberately
+     * strict), no NUL bytes, no absolute paths.
+     */
+    public static function isSafeArchivePath(string $relative): bool
+    {
+        return $relative !== ''
+            && !str_contains($relative, '..')
+            && !str_contains($relative, "\0")
+            && !str_starts_with($relative, '/');
     }
 
     /**
